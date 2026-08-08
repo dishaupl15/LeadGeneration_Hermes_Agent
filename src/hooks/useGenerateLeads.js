@@ -1,0 +1,81 @@
+/**
+ * useGenerateLeads
+ *
+ * Custom hook that encapsulates all state for the lead generation flow:
+ *   - isLoading  → show spinner / disable button
+ *   - error      → show error banner with message
+ *   - leads      → array of GeneratedCompany objects to render in the table
+ *   - lastParams → remember what was last requested (for Refresh)
+ *
+ * Usage:
+ *   const { leads, isLoading, error, generate, refresh, clear } = useGenerateLeads()
+ */
+
+import { useState, useCallback } from 'react'
+import { generateLeads as generateLeadsApi, getLeads as getLeadsApi } from '../services/api'
+
+export function useGenerateLeads() {
+  const [leads, setLeads]               = useState([])
+  const [isLoading, setIsLoading]       = useState(false)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const [error, setError]               = useState(null)   // null | string
+  const [lastParams, setLastParams]     = useState(null)   // null | { industry, city, count }
+
+  /**
+   * Fire the POST /leads/generate-leads request.
+   * @param {{ industry: string, city: string, count?: number }} params
+   */
+  const generate = useCallback(async (params) => {
+    setIsLoading(true)
+    setError(null)
+    setLastParams(params)
+
+    try {
+      const data = await generateLeadsApi(params)
+      // Backend returns MongoDB documents in data.leads
+      // (not raw Hermes output — these are the actual stored documents)
+      setLeads(data.leads ?? [])
+    } catch (err) {
+      setError(err.message ?? 'Something went wrong. Please try again.')
+      setLeads([])
+    } finally {
+      setIsLoading(false)
+    }
+  }, [])
+
+  /**
+   * Re-run the last generate request (re-triggers Hermes).
+   * Does nothing if generate() was never called.
+   */
+  const refresh = useCallback(() => {
+    if (lastParams) generate(lastParams)
+  }, [lastParams, generate])
+
+  /**
+   * Reload leads directly from MongoDB via GET /leads.
+   * No Hermes. No AI. Just a plain DB read.
+   */
+  const refreshFromDB = useCallback(async () => {
+    setIsRefreshing(true)
+    setError(null)
+    try {
+      const data = await getLeadsApi()
+      setLeads(data.leads ?? [])
+    } catch (err) {
+      setError(err.message ?? 'Failed to refresh leads from the database.')
+    } finally {
+      setIsRefreshing(false)
+    }
+  }, [])
+
+  /**
+   * Clear all state (reset the table to empty).
+   */
+  const clear = useCallback(() => {
+    setLeads([])
+    setError(null)
+    setLastParams(null)
+  }, [])
+
+  return { leads, isLoading, isRefreshing, error, lastParams, generate, refresh, refreshFromDB, clear }
+}
