@@ -1,0 +1,329 @@
+{
+  "success": true,
+  "inserted": 3,
+  "updated": 7,
+  "total": 10,
+  "query": "Real Estate companies in Pune",
+  "timestamp": "2026-08-09T18:06:23.285844+00:00",
+  "leads": [
+    {
+      "id": "6a7611280cdd88461c2320cc",
+      "company_name": "Kolte Patil Developers",
+      "website": "https://www.koltepatil.com",
+      "emails": [
+        "service@koltepatil.com"
+      ],
+      "phones": [
+        "1800 266 2233",
+        "+91 20 6742 9200"
+      ],
+      "address": "Contact Us · Pune Office. 8th floor, City Bay, Dhole Patil Road, Pune - 411001 India. +91-20 6742 9200 · Bengaluru Office. Kolte Patil Developers Ltd, 121, The ...",
+      "city": "Pune",
+      "state": "",
+      "country": "India",
+      "postal_code": "411001",
+      "sources": [
+        "https://www.koltepatil.com/",
+        "https://www.koltepatil.com/contact-us",
+        "https://www.koltepatil.com/contact",
+        "https://www.koltepatil.com/about-us"
+      ],
+      "email": "service@koltepatil.com",
+      "company_number": "1800 266 2233",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://www.koltepatil.com",
+      "last_verified": "2026-08-09T18:06:23.299121+00:00",
+      "confidence": 0.85,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.koltepatil.com",
+        "https://www.koltepatil.com/",
+        "https://www.koltepatil.com/contact-us",
+        "https://www.koltepatil.com/contact",
+        "https://www.koltepatil.com/about-us"
+      ],
+      "created_at": "2026-08-07T17:08:56.516000",
+      "updated_at": "2026-08-09T18:06:23.299000"
+    },
+    {
+      "id": "6a7782500cdd88461c23210b",
+      "company_name": "Savills",
+      "website": "https://www.savills.in/offices/estate-agents-in-pune.aspx",
+      "emails": [],
+      "phones": [
+        "+91 124 6310000",
+        "617 925 6300"
+      ],
+      "address": "",
+      "city": "",
+      "state": "",
+      "country": "",
+      "postal_code": "",
+      "sources": [],
+      "email": null,
+      "company_number": "+91 124 6310000",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://www.savills.in/offices/estate-agents-in-pune.aspx",
+      "last_verified": "2026-08-09T18:06:23.299121+00:00",
+      "confidence": 0.45,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.savills.in/offices/estate-agents-in-pune.aspx"
+      ],
+      "created_at": "2026-08-08T19:24:00.697000",
+      "updated_at": "2026-08-09T18:06:23.299000"
+    },
+    {
+      "id": "6a78408d0cdd88461c232110",
+      "company_name": "Nyati Group",
+      "website": "https://nyatigroup.com",
+      "emails": [
+        "marketing@nyatigroup.com",
+        "info@nyatigroup.com",
+        "mumbaisales@nyatigroup.com"
+      ],
+      "phones": [
+        "996 799 6788",
+        "+919967996788",
+        "+91 2066863333"
+      ],
+      "address": "Get in touch, Pune6th Floor, Nyati Unitree, Nagar Road, Yerwada, Pune - 411006, India.",
+      "city": "Pune",
+      "state": "",
+      "country": "India",
+      "postal_code": "411006",
+      "sources": [
+        "https://nyatigroup.com/",
+        "https://nyatigroup.com/contact-us",
+        "https://nyatigroup.com/contact",
+        "https://nyatigroup.com/about-us",
+        "https://nyatigroup.com/about",
+        "https://nyatigroup.com/leadership"
+      ],
+      "email": "marketing@nyatigroup.com",
+      "company_number": "+91 2066863333",
+      "founder_name": "Nitin Nyati",
+      "founder_number": null,
+      "source_url": "https://nyatigroup.com/contact-us",
+      "last_verified": "2026-08-09T18:06:23.299121+00:00",
+      "confidence": 1.0,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://nyatigroup.com/",
+        "https://nyatigroup.com/contact-us",
+        "https://nyatigroup.com/contact",
+        "https://nyatigroup.com/about-us",
+        "https://nyatigroup.com/about",
+        "https://nyatigroup.com/leadership"
+      ],
+      "created_at": "2026-08-09T08:55:41.644000",
+      "updated_at": "2026-08-09T18:06:23.299000"
+    },
+    {
+      "id": "6a78408d0cdd88461c232111",
+      "company_name": "Panchshil Realty",
+      "website": "https://www.panchshil.com",
+      "emails": [],
+      "phones": [
+        "+91 22 66863939",
+        "+91 20 66473200",
+        "+91 8970 007700",
+        "1800 121 9900"
+      ],
+      "address": ". Tech Park One, Tower E, 191 Yerwada, Pune - 411 006. India. +91 20 66473200. Mumbai Office. Express Towers, 20th Floor, Nariman Point, Mumbai ...",
+      "city": "Pune",
+      "state": "Maharashtra",
+      "country": "India",
+      "postal_code": "411006",
+      "sources": [],
+      "email": null,
+      "company_number": "1800 121 9900",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://www.panchshil.com",
+      "last_verified": "2026-08-09T18:06:23.299121+00:00",
+      "confidence": 0.45,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.panchshil.com"
+      ],
+      "created_at": "2026-08-09T08:55:41.644000",
+      "updated_at": "2026-08-09T18:06:23.299000"
+    },
+    {
+      "id": "6a7841230cdd88461c232118",
+      "company_name": "VTP Realty",
+      "website": "https://www.vtprealty.in",
+      "emails": [],
+      "phones": [
+        "+91 2066899269"
+      ],
+      "address": "VTP Realty Is Scaling Up Newer Peaks And The Team Too! We are the legends of Real Estate in Pune",
+      "city": "Pune",
+      "state": "Maharashtra",
+      "country": "India",
+      "postal_code": "411060",
+      "sources": [],
+      "email": null,
+      "company_number": "+91 2066899269",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://www.vtprealty.in",
+      "last_verified": "2026-08-09T18:06:23.299121+00:00",
+      "confidence": 0.4,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.vtprealty.in"
+      ],
+      "created_at": "2026-08-09T08:58:11.317000",
+      "updated_at": "2026-08-09T18:06:23.299000"
+    },
+    {
+      "id": "6a7846280cdd88461c232123",
+      "company_name": "Purple Realtors ! Residential and Commercial Projects in Pune",
+      "website": "https://purplerealtors.com",
+      "emails": [],
+      "phones": [
+        "+91 9040099999"
+      ],
+      "address": "Office No-205 Amar. Maharashtra-411045 +91.20.29516776 info@purplerealtors.com",
+      "city": "Pune",
+      "state": "Maharashtra",
+      "country": "India",
+      "postal_code": "411045",
+      "sources": [],
+      "email": null,
+      "company_number": "+91 9040099999",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://purplerealtors.com",
+      "last_verified": "2026-08-09T18:06:23.299121+00:00",
+      "confidence": 0.4,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://purplerealtors.com"
+      ],
+      "created_at": "2026-08-09T09:19:36.204000",
+      "updated_at": "2026-08-09T18:06:23.299000"
+    },
+    {
+      "id": "6a78b9640cdd88461c232127",
+      "company_name": "The Real Estate Mall",
+      "website": "https://www.realestatemallindia.com",
+      "emails": [],
+      "phones": [],
+      "address": "",
+      "city": "",
+      "state": "",
+      "country": "",
+      "postal_code": "",
+      "sources": [],
+      "email": null,
+      "company_number": "",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://www.realestatemallindia.com",
+      "last_verified": "2026-08-09T17:36:32.011501+00:00",
+      "confidence": 0.15,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.realestatemallindia.com"
+      ],
+      "created_at": "2026-08-09T17:31:16.849000",
+      "updated_at": "2026-08-09T18:06:23.299000"
+    },
+    {
+      "id": "6a78c19f0cdd88461c23212a",
+      "company_name": "Bhatnagars",
+      "website": "https://bhatnagars.co.in",
+      "emails": [
+        "info@bhatnagars.co.in"
+      ],
+      "phones": [
+        "+91 20 26122293",
+        "+91 (20) 26122927"
+      ],
+      "address": "F-28, Shanti Kunj, Opp. G.P.O, Sadhu Vaswani Road, Pune 411 001, Maharashtra, India ; Email: info@bhatnagars.co.in ; Telephone: +91-20-26122293 / ...",
+      "city": "Pune",
+      "state": "Maharashtra",
+      "country": "India",
+      "postal_code": "",
+      "sources": [],
+      "email": "info@bhatnagars.co.in",
+      "company_number": "+91 20 26122293",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://bhatnagars.co.in",
+      "last_verified": "2026-08-09T18:06:23.299121+00:00",
+      "confidence": 0.75,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://bhatnagars.co.in"
+      ],
+      "created_at": "2026-08-09T18:06:23.299000",
+      "updated_at": "2026-08-09T18:06:23.299000"
+    },
+    {
+      "id": "6a78c19f0cdd88461c23212b",
+      "company_name": "Dream Rise Realtor – Trusted Real Estate Solutions in Pune",
+      "website": "https://dreamriserealtor.com",
+      "emails": [
+        "contact@dreamriserealtor.com"
+      ],
+      "phones": [],
+      "address": "",
+      "city": "",
+      "state": "",
+      "country": "",
+      "postal_code": "",
+      "sources": [],
+      "email": "contact@dreamriserealtor.com",
+      "company_number": "",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://dreamriserealtor.com",
+      "last_verified": "2026-08-09T18:06:23.299121+00:00",
+      "confidence": 0.45,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://dreamriserealtor.com"
+      ],
+      "created_at": "2026-08-09T18:06:23.299000",
+      "updated_at": "2026-08-09T18:06:23.299000"
+    },
+    {
+      "id": "6a78c19f0cdd88461c23212c",
+      "company_name": "Proptimes",
+      "website": "https://proptimes.org",
+      "emails": [],
+      "phones": [
+        "+916360141698",
+        "+91 7411364999",
+        "+91 63669 79690",
+        "+91 97391 73552",
+        "63669 79690"
+      ],
+      "address": "",
+      "city": "",
+      "state": "",
+      "country": "",
+      "postal_code": "",
+      "sources": [],
+      "email": null,
+      "company_number": "63669 79690",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://proptimes.org",
+      "last_verified": "2026-08-09T18:06:23.299121+00:00",
+      "confidence": 0.45,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://proptimes.org"
+      ],
+      "created_at": "2026-08-09T18:06:23.299000",
+      "updated_at": "2026-08-09T18:06:23.299000"
+    }
+  ]
+}

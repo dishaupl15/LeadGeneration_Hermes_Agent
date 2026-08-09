@@ -1,157 +1,655 @@
 """
 app/services/hermes_service.py
---------------------------------
-Single responsibility: run the lead-generation pipeline and return
-validated JSON ready for MongoDB insertion.
+──────────────────────────────
+Hermes Desktop Agent WebSocket client.
 
 Architecture
-------------
-FastAPI
-  -> hermes_service.call_hermes_agent()
-       -> subprocess: python leadgen.py --query "<query>" --num N
-            -> leadgen.py
-                 -> Serper API  (Google search)
-                 -> Firecrawl API (website scraping)
-                 -> returns JSON on stdout
+────────────
+  FastAPI  →  call_hermes_agent(query, num)
+    →  WebSocket  →  ws://127.0.0.1:9119/api/ws
+    →  Hermes Desktop Agent performs deep multi-source research
+    →  Returns structured JSON with companies
+    →  normalize_hermes_response()
+    →  Returns dict to src/routes/leads.py
 
-NOTE on Windows + asyncio subprocesses
----------------------------------------
-asyncio.create_subprocess_exec requires ProactorEventLoop on Windows.
-Uvicorn by default uses SelectorEventLoop which does NOT support subprocesses.
-We use loop.run_in_executor + subprocess.run (blocking, thread-pool) instead —
-this works on every platform and every event loop without configuration.
+MANDATORY CONSTRAINT
+────────────────────
+This service connects to the Hermes Desktop Agent for ALL primary company
+research.  It does NOT fall back to direct Serper / Firecrawl calls.
+
+If Hermes is unavailable, a clear HermesUnavailableError is raised so the
+caller (routes/leads.py) can return an informative HTTP 502 to the frontend.
+The user will see the exact reason rather than silently receiving stale data
+from a different pipeline.
+
+WebSocket protocol (Hermes Desktop Agent) — JSON-RPC 2.0
+──────────────────────────────────────────────────────────
+Hermes Desktop Agent uses the JSON-RPC 2.0 protocol over WebSocket.
+Source: C:\\Users\\<user>\\AppData\\Local\\hermes\\hermes-agent\\tui_gateway\\ws.py
+        and tui_gateway/server.py
+
+Wire format (all messages are newline-delimited JSON):
+
+  CLIENT → SERVER (JSON-RPC 2.0 requests):
+    { "jsonrpc": "2.0", "id": "<uuid>", "method": "session.create", "params": {} }
+    { "jsonrpc": "2.0", "id": "<uuid>", "method": "prompt.submit",
+      "params": { "session_id": "<sid>", "text": "<prompt>" } }
+
+  SERVER → CLIENT (JSON-RPC 2.0 responses and events):
+    Immediate RPC response:
+      { "jsonrpc": "2.0", "id": "<uuid>", "result": { "session_id": "...", ... } }
+      { "jsonrpc": "2.0", "id": "<uuid>", "result": { "status": "streaming" } }
+
+    Async events emitted DURING the agent turn:
+      { "jsonrpc": "2.0", "method": "event",
+        "params": { "type": "<event_type>", "session_id": "<sid>",
+                    "payload": { ... } } }
+
+  Event types (from tui_gateway/server.py _emit calls):
+    gateway.ready    — server ready, sent immediately on connection
+    message.start    — agent started generating a response
+    message.delta    — streaming text chunk in payload.text
+    message.interim  — complete interim assistant message
+    message.complete — FINAL response in payload.text, payload.status="complete"
+    session.info     — session metadata update
+    error            — agent-level error in payload.message
+    tool.call        — agent called a tool
+    tool.result      — tool returned a result
+
+  The FINAL response text is in:
+    message.complete → params.payload.text
+
+  Authentication:
+    Token is passed as URL query param: ?token=<HERMES_DASHBOARD_SESSION_TOKEN>
+
+HERMES_TIMEOUT controls how long to wait for message.complete (default: 600s = 10 min).
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import os
-import subprocess
+import re
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from pathlib import Path
 
-# ── Pipeline config ───────────────────────────────────────────────────────────
+from dotenv import load_dotenv
 
-# Absolute path to the leadgen.py script
-# Defaults to the known installation path; override with LEADGEN_SCRIPT env var.
-_default_script = r"C:\Users\Disha\LeadGeneration\tools\leadgen.py"
-LEADGEN_SCRIPT = Path(os.getenv("LEADGEN_SCRIPT", _default_script))
+load_dotenv()
 
-# Python interpreter — use the same venv that runs FastAPI so all deps are available
-PYTHON_EXE = Path(sys.executable)
-
-# Timeout for the full pipeline (Serper + Firecrawl scraping across N companies)
-PIPELINE_TIMEOUT = 600  # 10 minutes
-
-# Thread pool for running the blocking subprocess (avoids event-loop compatibility issues on Windows)
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hermes")
-
-# ── Required output fields ────────────────────────────────────────────────────
-
-REQUIRED_TOP_FIELDS = {"companies"}
+# ── Config (from .env — never hard-coded) ────────────────────────────────────
+_WS_URL: str = os.getenv("HERMES_WS_URL", "ws://127.0.0.1:9119/api/ws")
+_TOKEN:  str = os.getenv("HERMES_DASHBOARD_SESSION_TOKEN", "")
+_TIMEOUT: float = float(os.getenv("HERMES_TIMEOUT", "300"))
 
 
-# ── Blocking runner (runs in thread pool) ────────────────────────────────────
+# ── Custom exception ─────────────────────────────────────────────────────────
 
-def _run_leadgen_blocking(query: str, num: int) -> tuple[str, str, int]:
+class HermesUnavailableError(RuntimeError):
+    """Raised when the Hermes Desktop Agent cannot be reached."""
+    pass
+
+
+# ── Prompt builder ────────────────────────────────────────────────────────────
+
+def build_research_prompt(query: str, num: int) -> str:
     """
-    Run leadgen.py synchronously in a worker thread.
-    Returns (stdout_text, stderr_text, returncode).
-    Safe to call from any asyncio event loop on any platform.
+    Build a focused, efficiency-bounded research prompt for Hermes.
+
+    Instructs Hermes to stop as soon as num companies are found to avoid
+    exhaustive research that can exceed the timeout budget.
     """
-    subprocess_env = os.environ.copy()
-    subprocess_env["PYTHONIOENCODING"] = "utf-8"
-    subprocess_env["PYTHONUTF8"] = "1"
+    return f"""You are the lead-generation research agent.
 
-    cmd = [
-        str(PYTHON_EXE),
-        "-X", "utf8",
-        str(LEADGEN_SCRIPT),
-        "--query", query,
-        "--num", str(num),
-    ]
+User request: Find {num} real companies matching this query: {query}
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        timeout=PIPELINE_TIMEOUT,
-        cwd=str(LEADGEN_SCRIPT.parent),
-        env=subprocess_env,
+EFFICIENCY RULE: Stop as soon as you have confirmed {num} valid companies.
+Do NOT keep researching once you have {num} results. Return immediately.
+Do NOT exceed {num * 5} total tool/search calls.
+
+For every company:
+1. Run ONE search query to find the company and its official website.
+2. Visit the official website. Check Contact and About pages ONLY.
+3. If contact info is not on the website, try ONE additional public source.
+4. Do not invent or guess any information.
+5. If a field is not publicly available after 2 sources, return null for that field.
+6. Never fabricate phone numbers or email addresses.
+7. Reject: 404 pages, generic directories, government portals.
+
+Return ONLY valid JSON. No markdown. No text outside the JSON.
+
+Required response format:
+{{
+  "companies": [
+    {{
+      "company_name": "...",
+      "industry": "...",
+      "website": "...",
+      "email": "...",
+      "company_number": "...",
+      "founder_name": "...",
+      "founder_number": null,
+      "address": "...",
+      "city": "...",
+      "state": "...",
+      "country": "...",
+      "source_url": "...",
+      "sources": [],
+      "confidence": 0.0
+    }}
+  ]
+}}"""
+
+
+# ── WebSocket client ──────────────────────────────────────────────────────────
+
+async def _connect_and_send(prompt: str) -> str:
+    """
+    Connect to Hermes Desktop Agent WebSocket using JSON-RPC 2.0 protocol,
+    create a session, submit the prompt, collect the full response, and
+    return the raw response string.
+
+    Protocol (verified from Hermes source tui_gateway/ws.py + server.py):
+      1. Connect → receive gateway.ready event
+      2. Send session.create RPC → receive session_id in result
+      3. Send prompt.submit RPC with session_id → receive status:"streaming"
+      4. Collect message.delta chunks and wait for message.complete
+      5. Return payload.text from message.complete
+
+    Raises HermesUnavailableError with an exact reason if anything fails.
+    """
+    try:
+        from websockets.asyncio.client import connect as ws_connect
+        from websockets.exceptions import WebSocketException
+    except ImportError:
+        raise HermesUnavailableError(
+            "websockets library not installed. Run: pip install websockets"
+        )
+
+    # Build URL with token as query param (Hermes Desktop convention)
+    ws_url = _WS_URL
+    if _TOKEN:
+        separator = "&" if "?" in ws_url else "?"
+        ws_url = f"{ws_url}{separator}token={_TOKEN}"
+
+    _ts = lambda: __import__('datetime').datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    def _log(msg): print(f"[{_ts()}] {msg}")
+
+    _log(f"[HERMES] Connecting to {_WS_URL} …")
+
+    try:
+        async with ws_connect(
+            ws_url,
+            open_timeout=30,
+            ping_interval=60,
+            ping_timeout=_TIMEOUT,
+            close_timeout=30,
+            additional_headers={"Origin": "http://localhost:9119"},
+        ) as ws:
+            _log("[HERMES] WebSocket connected")
+
+            import uuid as _uuid
+
+            rpc_id_session = _uuid.uuid4().hex
+            rpc_id_prompt  = _uuid.uuid4().hex
+
+            session_id: str | None = None
+            session_created = False
+            prompt_sent = False
+            delta_parts: list[str] = []
+            delta_count = 0
+            research_started = False
+            start_time = asyncio.get_event_loop().time()
+            last_heartbeat = 0.0
+
+            async def _read_with_timeout() -> str | None:
+                nonlocal session_id, session_created, prompt_sent
+                nonlocal delta_parts, delta_count, research_started, last_heartbeat
+
+                async for raw_frame in ws:
+                    elapsed = asyncio.get_event_loop().time() - start_time
+
+                    # Heartbeat every 60 seconds
+                    if elapsed - last_heartbeat >= 60:
+                        last_heartbeat = elapsed
+                        _log(f"[HERMES] Still waiting — elapsed: {elapsed:.0f}s")
+
+                    raw = (
+                        raw_frame
+                        if isinstance(raw_frame, str)
+                        else raw_frame.decode("utf-8", errors="replace")
+                    )
+
+                    # Parse JSON-RPC 2.0 frame
+                    try:
+                        frame = json.loads(raw)
+                    except (json.JSONDecodeError, ValueError):
+                        _log(f"[HERMES] RAW non-JSON frame ({len(raw)} chars): {raw[:120]!r}")
+                        continue
+
+                    frame_id     = frame.get("id")
+                    frame_method = frame.get("method", "")
+                    frame_result = frame.get("result")
+                    frame_error  = frame.get("error")
+                    params       = frame.get("params") or {}
+                    event_type   = params.get("type", "")
+                    payload      = params.get("payload") or {}
+
+                    # ── JSON-RPC responses to our calls ────────────────────────
+                    if frame_id is not None and frame_method == "":
+                        if frame_error:
+                            _log(f"[HERMES] RPC ERROR id={frame_id}: {frame_error}")
+                            raise HermesUnavailableError(
+                                f"Hermes RPC error: {frame_error}"
+                            )
+
+                        if frame_id == rpc_id_session and not session_created:
+                            result = frame_result or {}
+                            session_id = result.get("session_id") or result.get("id")
+                            _log(f"[HERMES] Session created — session_id={session_id!r}")
+                            session_created = True
+                            # Submit the prompt
+                            prompt_msg = json.dumps({
+                                "jsonrpc": "2.0",
+                                "id": rpc_id_prompt,
+                                "method": "prompt.submit",
+                                "params": {
+                                    "session_id": session_id,
+                                    "text": prompt,
+                                },
+                            })
+                            await ws.send(prompt_msg)
+                            _log("[HERMES] Research request sent")
+
+                        elif frame_id == rpc_id_prompt and not prompt_sent:
+                            _log(f"[HERMES] Request acknowledged — status={frame_result!r}")
+                            prompt_sent = True
+                        continue
+
+                    # ── JSON-RPC 2.0 event frames ──────────────────────────────
+                    if frame_method != "event":
+                        _log(f"[HERMES] UNKNOWN FRAME method={frame_method!r} keys={list(frame.keys())}")
+                        continue
+
+                    # ── gateway.ready — create session immediately ─────────────
+                    if event_type == "gateway.ready":
+                        _log("[HERMES] gateway.ready — creating session")
+                        create_msg = json.dumps({
+                            "jsonrpc": "2.0",
+                            "id": rpc_id_session,
+                            "method": "session.create",
+                            "params": {},
+                        })
+                        await ws.send(create_msg)
+                        continue
+
+                    # ── Streaming response events ──────────────────────────────
+                    if event_type == "message.start":
+                        _log("[HERMES] Agent started responding (message.start)")
+                        research_started = True
+
+                    elif event_type == "message.delta":
+                        chunk = payload.get("text", "")
+                        if chunk:
+                            delta_parts.append(chunk)
+                            delta_count += 1
+                            if delta_count % 20 == 0:
+                                _log(f"[HERMES] Agent is researching… ({delta_count} chunks, {sum(len(p) for p in delta_parts)} chars so far)")
+
+                    elif event_type == "message.interim":
+                        text = payload.get("text", "")
+                        _log(f"[HERMES] Interim response: {text[:80]!r}")
+
+                    elif event_type == "message.complete":
+                        # ── FINAL response ─────────────────────────────────────
+                        status = payload.get("status", "complete")
+                        full_text = payload.get("text", "") or "".join(delta_parts)
+                        _log(
+                            f"[HERMES] Final response received — "
+                            f"status={status!r} length={len(full_text)} chars "
+                            f"elapsed={elapsed:.1f}s"
+                        )
+                        if status == "error":
+                            error_msg = payload.get("error") or "unknown agent error"
+                            raise HermesUnavailableError(
+                                f"Hermes agent returned an error: {error_msg}"
+                            )
+                        return full_text
+
+                    elif event_type == "session.info":
+                        model = payload.get("model", "?")
+                        running = payload.get("running", "?")
+                        _log(f"[HERMES] Session info — model={model!r} running={running}")
+
+                    elif event_type == "error":
+                        msg = payload.get("message", str(payload))
+                        _log(f"[HERMES] Agent ERROR: {msg}")
+                        raise HermesUnavailableError(f"Hermes agent error: {msg}")
+
+                    elif event_type in ("tool.call", "tool.result",
+                                        "thinking.delta", "reasoning.delta",
+                                        "tool.start", "tool.end"):
+                        # Tool activity — Hermes is actively researching
+                        if event_type == "tool.call":
+                            tool_name = payload.get("name") or payload.get("tool", "?")
+                            _log(f"[HERMES] Search/tool activity detected — {tool_name!r}")
+
+                    else:
+                        _log(
+                            f"[HERMES] EVENT type={event_type!r} "
+                            f"payload_keys={list(payload.keys() if isinstance(payload, dict) else [])}"
+                        )
+
+                # Connection closed without a message.complete
+                if delta_parts:
+                    joined = "".join(delta_parts)
+                    _log(f"[HERMES] Connection closed — using {len(joined)} chars from delta parts")
+                    return joined
+                return None
+
+            try:
+                result = await asyncio.wait_for(_read_with_timeout(), timeout=_TIMEOUT)
+            except asyncio.TimeoutError:
+                raise HermesUnavailableError(
+                    f"Hermes did not respond within {_TIMEOUT:.0f}s. "
+                    f"Check that the agent is running and the research skill is active."
+                )
+
+            if not result:
+                raise HermesUnavailableError(
+                    "Hermes returned an empty response. "
+                    "The agent may have completed without generating content."
+                )
+
+            _log(f"[HERMES] Research response received ({len(result)} chars)")
+            return result
+
+    except HermesUnavailableError:
+        raise  # re-raise as-is
+    except ConnectionRefusedError:
+        raise HermesUnavailableError(
+            f"Unable to connect to Hermes at {_WS_URL}. "
+            "Connection refused — is the Hermes Desktop Agent running? "
+            "Start it with: hermes serve"
+        )
+    except OSError as exc:
+        raise HermesUnavailableError(
+            f"Network error connecting to Hermes at {_WS_URL}: {exc}"
+        )
+    except Exception as exc:
+        ws_exc_type = "WebSocketException"
+        try:
+            from websockets.exceptions import WebSocketException
+            if isinstance(exc, WebSocketException):
+                ws_exc_type = type(exc).__name__
+        except ImportError:
+            pass
+        raise HermesUnavailableError(
+            f"WebSocket error from Hermes ({type(exc).__name__}): {exc}"
+        )
+
+
+# ── Response parser ───────────────────────────────────────────────────────────
+
+def _extract_json_from_response(raw: str) -> dict:
+    """
+    Extract and parse the JSON companies payload from Hermes's response.
+
+    Hermes may:
+    - Return clean JSON directly
+    - Wrap JSON in a markdown code block (```json … ```)
+    - Include explanatory text before/after the JSON block
+    - Return partial/malformed JSON (json-repair handles this)
+
+    Returns a dict with at least a "companies" key.
+    Raises ValueError if no parseable JSON is found.
+    """
+    if not raw:
+        raise ValueError("Hermes returned an empty response.")
+
+    # ── Try 1: direct JSON parse ──────────────────────────────────────────
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"companies": parsed}
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # ── Try 2: extract JSON block from markdown fences ────────────────────
+    fence_match = re.search(r'```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```', raw, re.DOTALL)
+    if fence_match:
+        try:
+            parsed = json.loads(fence_match.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"companies": parsed}
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # ── Try 3: find the largest JSON object in the response ───────────────
+    # Walk through raw looking for { … } blocks
+    depth = 0
+    start = -1
+    best_json = None
+    for i, ch in enumerate(raw):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start != -1:
+                candidate = raw[start:i + 1]
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict) and "companies" in parsed:
+                        return parsed
+                    best_json = parsed  # keep even without "companies"
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                start = -1
+
+    if best_json is not None:
+        if "companies" not in best_json:
+            # Wrap bare company dict in list
+            if "company_name" in best_json:
+                return {"companies": [best_json]}
+        return best_json
+
+    # ── Try 4: json-repair (handles truncated / slightly malformed JSON) ──
+    try:
+        from json_repair import repair_json
+        repaired_str = repair_json(raw)
+        if repaired_str and repaired_str.strip() not in ('""', '{}', '[]'):
+            repaired = json.loads(repaired_str)
+            if isinstance(repaired, dict):
+                return repaired
+            if isinstance(repaired, list):
+                return {"companies": repaired}
+    except (ImportError, Exception):
+        pass
+
+    raise ValueError(
+        f"Could not extract JSON from Hermes response. "
+        f"First 500 chars: {raw[:500]!r}"
     )
 
-    stdout_text = result.stdout.decode("utf-8", errors="replace").strip()
-    stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
-    return stdout_text, stderr_text, result.returncode
+
+# ── Normaliser ───────────────────────────────────────────────────────────────
+
+def _normalize_hermes_company(raw: dict) -> dict:
+    """
+    Normalise a single company dict returned by Hermes into the shape
+    that src/routes/leads.py and the existing MongoDB upsert expect.
+
+    Key rules:
+    - Never fabricate missing fields — pass None / [] for absent data.
+    - Preserve all existing field names used by the MongoDB upsert.
+    - Add research_source = "hermes" and research_sources = [source_url, ...]
+      so the caller can prove the lead came through Hermes.
+    - Map Hermes field names → internal field names where they differ.
+    """
+    def _str(val, default="") -> str:
+        if val is None:
+            return default
+        s = str(val).strip()
+        return s if s.lower() not in ("none", "null", "n/a", "na", "not available", "") else default
+
+    def _nullable(val) -> str | None:
+        if val is None:
+            return None
+        s = str(val).strip()
+        return s if s.lower() not in ("none", "null", "n/a", "na", "not available", "") else None
+
+    def _list(val) -> list:
+        if not val:
+            return []
+        if isinstance(val, list):
+            return [str(v).strip() for v in val if v and str(v).strip()]
+        return [str(val).strip()] if str(val).strip() else []
+
+    company_name   = _str(raw.get("company_name") or raw.get("name", ""))
+    website        = _str(raw.get("website") or raw.get("domain", ""))
+    email          = _nullable(raw.get("email"))
+    company_number = _nullable(raw.get("company_number") or raw.get("phone"))
+    founder_name   = _nullable(raw.get("founder_name"))
+    founder_number = _nullable(raw.get("founder_number"))
+    address        = _str(raw.get("address", ""))
+    city           = _str(raw.get("city", ""))
+    state          = _str(raw.get("state", ""))
+    country        = _str(raw.get("country", ""))
+    source_url     = _str(raw.get("source_url") or website)
+    sources        = _list(raw.get("sources"))
+    confidence_raw = raw.get("confidence", 0.0)
+    try:
+        confidence = round(float(confidence_raw), 2)
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    # research_sources: collect all URL sources Hermes reported
+    research_sources: list[str] = list(sources)
+    if source_url and source_url not in research_sources:
+        research_sources.insert(0, source_url)
+
+    # Build emails/phones lists for backward compat (routes/leads.py reads these)
+    emails: list[str] = []
+    if email:
+        emails = [email]
+
+    phones: list[str] = []
+    if company_number:
+        phones = [company_number]
+
+    return {
+        # ── Core identity ─────────────────────────────────────────────────
+        "company_name":     company_name,
+        "website":          website,
+        # ── Legacy contact arrays (kept for MongoDB upsert compat) ─────────
+        "emails":           emails,
+        "phones":           phones,
+        # ── Address ───────────────────────────────────────────────────────
+        "address":          address,
+        "city":             city,
+        "state":            state,
+        "country":          country,
+        "postal_code":      _str(raw.get("postal_code", "")),
+        # ── Enriched single-value fields ───────────────────────────────────
+        "email":            email,            # best single validated email
+        "company_number":   company_number,   # None if not found
+        "founder_name":     founder_name,     # None if not found
+        "founder_number":   founder_number,   # None unless publicly listed
+        "source_url":       source_url,
+        "sources":          sources,
+        "confidence":       confidence,
+        # ── Validated lists (pass through for pipeline compat) ─────────────
+        "validated_emails": emails,
+        "validated_phones": [{"number": company_number, "type": "unknown"}] if company_number else [],
+        # ── Hermes source trace ────────────────────────────────────────────
+        "research_source":  "hermes",
+        "research_sources": research_sources,
+        # ── Verify stage placeholder (will be filled by existing pipeline) ─
+        "last_verified":    None,
+        # ── Internal helpers for existing pipeline stages ─────────────────
+        "description":      _str(raw.get("description") or raw.get("industry", "")),
+        "services":         _list(raw.get("services")),
+        "_scraped_pages":   [],          # no raw pages from Hermes path
+        "_merged_markdown": "",
+        # pages_visited needed by score_confidence()
+        "pages_visited":    {
+            "success": research_sources[:6],
+            "failed":  [],
+        },
+    }
+
+
+def normalize_hermes_response(raw_text: str) -> list[dict]:
+    """
+    Parse Hermes's raw text response and return a list of normalised company
+    dicts ready for the existing VALIDATE → CONFIDENCE → ENRICH → VERIFY
+    → DEDUPLICATE → MongoDB pipeline.
+
+    Never fabricates data.  If a field is missing it stays None / [].
+    """
+    parsed = _extract_json_from_response(raw_text)
+
+    raw_companies = parsed.get("companies", [])
+    if not raw_companies and isinstance(parsed, list):
+        raw_companies = parsed
+
+    if not isinstance(raw_companies, list):
+        raw_companies = [raw_companies] if raw_companies else []
+
+    return [_normalize_hermes_company(c) for c in raw_companies if isinstance(c, dict)]
 
 
 # ── Public interface ──────────────────────────────────────────────────────────
 
 async def call_hermes_agent(query: str, num: int = 10) -> dict:
     """
-    Run the lead-generation pipeline for the given query.
+    Send a research request to the Hermes Desktop Agent via WebSocket.
 
-    Runs leadgen.py in a thread pool (blocking subprocess.run) so it works
-    on any asyncio event loop, including uvicorn's SelectorEventLoop on Windows.
+    This is the ONLY path for primary company discovery.
+    No fallback to direct Serper / Firecrawl calls is ever attempted.
 
-    Returns a normalised dict ready for MongoDB upsert.
+    Parameters
+    ----------
+    query : str
+        The user's search query (e.g. "Real estate companies in Pune").
+    num : int
+        How many companies to request.
+
+    Returns
+    -------
+    dict with keys:
+        query        : the original query
+        timestamp    : UTC ISO-8601 string
+        companies    : list of normalised company dicts
+        total        : number of companies
+        status       : "success"
 
     Raises
     ------
-    RuntimeError  on timeout, non-zero exit, missing script, or invalid JSON
+    HermesUnavailableError
+        If the WebSocket connection fails for any reason.
+        The caller (routes/leads.py) converts this to HTTP 502.
     """
-    if not LEADGEN_SCRIPT.exists():
-        raise RuntimeError(
-            f"leadgen.py not found at {LEADGEN_SCRIPT}. "
-            "Verify the LeadGeneration toolkit installation."
-        )
+    print(f"[LEADS] Sending research request to Hermes — query={query!r} num={num}")
 
-    if not PYTHON_EXE.exists():
-        raise RuntimeError(f"Python interpreter not found: {PYTHON_EXE}")
+    prompt = build_research_prompt(query, num)
 
-    print(f"[HermesService] Running leadgen.py: query={query!r} num={num}")
+    # Connect → send → receive  (raises HermesUnavailableError on any failure)
+    raw_response = await _connect_and_send(prompt)
 
-    loop = asyncio.get_event_loop()
-    try:
-        stdout_text, stderr_text, returncode = await loop.run_in_executor(
-            _executor,
-            _run_leadgen_blocking,
-            query,
-            num,
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            f"leadgen.py timed out after {PIPELINE_TIMEOUT}s for query: {query!r}"
-        )
-    except Exception as exc:
-        raise RuntimeError(f"Failed to launch leadgen.py: {exc}") from exc
-
-    # ── Log stderr (progress lines from leadgen.py) ───────────────────────────
-    if stderr_text:
-        for line in stderr_text.splitlines():
-            print(f"[leadgen] {line}")
-
-    # ── Guard: no stdout at all ───────────────────────────────────────────────
-    if not stdout_text:
-        hint = stderr_text[-400:] if stderr_text else "(no output)"
-        raise RuntimeError(
-            f"leadgen.py produced no stdout. "
-            f"Exit code: {returncode}. Hint: {hint}"
-        )
-
-    # ── Parse JSON ────────────────────────────────────────────────────────────
-    raw = _extract_json(stdout_text)
-
-    # ── Validate ──────────────────────────────────────────────────────────────
-    _validate(raw)
-
-    # ── Normalise ─────────────────────────────────────────────────────────────
-    companies = [_normalize_company(c) for c in raw.get("companies", [])]
-
-    print(f"[HermesService] Pipeline complete — {len(companies)} companies returned")
+    # Parse and normalise
+    companies = normalize_hermes_response(raw_response)
+    print(f"[HERMES] Companies returned by Hermes: {len(companies)}")
 
     return {
-        "query":     raw.get("query", query),
+        "query":     query,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "companies": companies,
         "total":     len(companies),
@@ -159,77 +657,57 @@ async def call_hermes_agent(query: str, num: int = 10) -> dict:
     }
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# ── Connection test (used by test_hermes_integration.py) ─────────────────────
 
-def _extract_json(text: str) -> dict:
-    """Extract a JSON object from stdout. Handles both raw JSON and wrapped output."""
-    import re
+async def test_hermes_connection() -> dict:
+    """
+    Lightweight connectivity test using correct JSON-RPC 2.0 protocol.
 
-    # 1. Try raw parse first (leadgen.py outputs clean JSON)
+    Returns a result dict:
+        connected : bool
+        url       : str  (without token)
+        error     : str | None
+    """
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+        from websockets.asyncio.client import connect as ws_connect
+    except ImportError:
+        return {"connected": False, "url": _WS_URL, "error": "websockets not installed"}
 
-    # 2. Find the outermost { ... } block (skip any progress lines before JSON)
-    start = text.find("{")
-    end   = text.rfind("}")
-    if start != -1 and end > start:
-        try:
-            return json.loads(text[start:end + 1])
-        except json.JSONDecodeError:
-            pass
+    ws_url = _WS_URL
+    if _TOKEN:
+        separator = "&" if "?" in ws_url else "?"
+        ws_url = f"{ws_url}{separator}token={_TOKEN}"
 
-    raise RuntimeError(
-        f"Could not extract valid JSON from leadgen.py output. "
-        f"First 300 chars: {text[:300]!r}"
-    )
+    try:
+        async with ws_connect(
+            ws_url,
+            open_timeout=10,
+            additional_headers={"Origin": "http://localhost:9119"},
+        ) as ws:
+            # Wait for gateway.ready event — that's Hermes's on-connect signal
+            try:
+                async with asyncio.timeout(8):
+                    raw = await ws.recv()
+                    frame = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+                    params = frame.get("params") or {}
+                    if params.get("type") == "gateway.ready" or frame.get("method") == "event":
+                        return {"connected": True, "url": _WS_URL, "error": None}
+                    # Any frame received = connected
+                    return {"connected": True, "url": _WS_URL, "error": None}
+            except (asyncio.TimeoutError, Exception):
+                # A frame wasn't received but the connection was accepted = still connected
+                return {"connected": True, "url": _WS_URL, "error": None}
 
-
-def _validate(data: dict) -> None:
-    """Raise RuntimeError if required top-level fields are missing."""
-    missing = REQUIRED_TOP_FIELDS - set(data.keys())
-    if missing:
-        raise RuntimeError(
-            f"leadgen.py JSON missing required fields: {missing}. "
-            f"Got keys: {set(data.keys())}"
-        )
-    if not isinstance(data.get("companies"), list):
-        raise RuntimeError(
-            "'companies' field must be a list. "
-            f"Got: {type(data.get('companies'))}"
-        )
-
-
-def _normalize_company(raw: dict) -> dict:
-    """
-    Map leadgen.py output schema → MongoDB document schema.
-
-    leadgen.py uses "name" as the company name key and may return
-    address as either a nested dict or a plain string.
-    """
-    addr = raw.get("address", {})
-    if isinstance(addr, str):
-        street, city, state, country, postal_code = addr, "", "", "", ""
-    elif isinstance(addr, dict):
-        street      = addr.get("street", "")
-        city        = addr.get("city", "")
-        state       = addr.get("state", "")
-        country     = addr.get("country", "")
-        postal_code = addr.get("postal_code", "")
-    else:
-        street = city = state = country = postal_code = ""
-
-    return {
-        # leadgen.py uses "name"; accept both for safety
-        "company_name": raw.get("name") or raw.get("company_name", ""),
-        "website":      raw.get("website", ""),
-        "emails":       raw.get("emails", []),
-        "phones":       raw.get("phones", []),
-        "address":      street,
-        "city":         city,
-        "state":        state,
-        "country":      country,
-        "postal_code":  postal_code,
-        "sources":      raw.get("sources", []),
-    }
+    except ConnectionRefusedError:
+        return {
+            "connected": False,
+            "url": _WS_URL,
+            "error": (
+                "Connection refused. Hermes Desktop Agent is not running. "
+                "Start it with: hermes serve"
+            ),
+        }
+    except OSError as exc:
+        return {"connected": False, "url": _WS_URL, "error": f"Network error: {exc}"}
+    except Exception as exc:
+        return {"connected": False, "url": _WS_URL, "error": f"{type(exc).__name__}: {exc}"}

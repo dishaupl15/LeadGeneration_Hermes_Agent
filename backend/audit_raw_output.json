@@ -1,0 +1,283 @@
+{
+  "success": true,
+  "inserted": 0,
+  "updated": 8,
+  "total": 8,
+  "query": "Real Estate companies in Pune",
+  "timestamp": "2026-08-09T09:36:27.735006+00:00",
+  "leads": [
+    {
+      "id": "6a7611280cdd88461c2320cc",
+      "company_name": "Kolte Patil Developers",
+      "website": "https://www.koltepatil.com",
+      "emails": [],
+      "phones": [
+        "1800 266 2233",
+        "+91 20 6742 9200"
+      ],
+      "address": "Contact Us · Pune Office. 8th floor, City Bay, Dhole Patil Road, Pune - 411001 India. +91-20 6742 9200 · Bengaluru Office. Kolte Patil Developers Ltd, 121, The ...",
+      "city": "Pune",
+      "state": "",
+      "country": "India",
+      "postal_code": "411001",
+      "sources": [
+        "https://www.koltepatil.com/",
+        "https://www.koltepatil.com/contact",
+        "https://www.koltepatil.com/contact-us",
+        "https://www.koltepatil.com/about",
+        "https://www.koltepatil.com/about-us",
+        "https://www.koltepatil.com/leadership",
+        "https://www.koltepatil.com/management",
+        "https://www.koltepatil.com/team",
+        "https://www.koltepatil.com/locations"
+      ],
+      "email": null,
+      "company_number": "1800 266 2233",
+      "founder_name": "Aniruddha Patil",
+      "founder_number": null,
+      "source_url": "https://www.koltepatil.com/about-us/founders",
+      "last_verified": "2026-08-09T09:36:30.085890+00:00",
+      "confidence": 0.55,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.koltepatil.com/about-us/founders",
+        "https://www.koltepatil.com/",
+        "https://www.koltepatil.com/contact",
+        "https://www.koltepatil.com/contact-us",
+        "https://www.koltepatil.com/about",
+        "https://www.koltepatil.com/about-us",
+        "https://www.koltepatil.com/leadership",
+        "https://www.koltepatil.com/management",
+        "https://www.koltepatil.com/team",
+        "https://www.koltepatil.com/locations"
+      ],
+      "created_at": "2026-08-07T17:08:56.516000",
+      "updated_at": "2026-08-09T09:36:30.085000"
+    },
+    {
+      "id": "6a7782500cdd88461c23210b",
+      "company_name": "Savills",
+      "website": "https://www.savills.in/offices/estate-agents-in-pune.aspx",
+      "emails": [],
+      "phones": [
+        "+91 95 3512 9604",
+        "+1 404 467 0707",
+        "404 467 0707"
+      ],
+      "address": "",
+      "city": "",
+      "state": "",
+      "country": "",
+      "postal_code": "",
+      "sources": [],
+      "email": null,
+      "company_number": "+1 404 467 0707",
+      "founder_name": "Stacey Cartwright",
+      "founder_number": null,
+      "source_url": "https://www.savills.in/offices/estate-agents-in-pune.aspx",
+      "last_verified": "2026-08-09T09:36:30.085890+00:00",
+      "confidence": 0.45,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.savills.in/offices/estate-agents-in-pune.aspx"
+      ],
+      "created_at": "2026-08-08T19:24:00.697000",
+      "updated_at": "2026-08-09T09:36:30.085000"
+    },
+    {
+      "id": "6a78408d0cdd88461c232110",
+      "company_name": "Real Estate Developers in Pune",
+      "website": "https://nyatigroup.com",
+      "emails": [
+        "marketing@nyatigroup.com"
+      ],
+      "phones": [
+        "+91 2066863333"
+      ],
+      "address": "## Get in touch, Pune6th Floor, Nyati Unitree, Nagar Road, Yerwada, Pune - 411006, India.",
+      "city": "Pune",
+      "state": "",
+      "country": "India",
+      "postal_code": "411006",
+      "sources": [
+        "https://nyatigroup.com/"
+      ],
+      "email": "marketing@nyatigroup.com",
+      "company_number": "+91 2066863333",
+      "founder_name": "Aniruddha Patil",
+      "founder_number": null,
+      "source_url": "https://nyatigroup.com/",
+      "last_verified": "2026-08-09T09:36:30.085890+00:00",
+      "confidence": 0.8,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://nyatigroup.com/"
+      ],
+      "created_at": "2026-08-09T08:55:41.644000",
+      "updated_at": "2026-08-09T09:36:30.085000"
+    },
+    {
+      "id": "6a78408d0cdd88461c232111",
+      "company_name": "Panchshil",
+      "website": "https://www.panchshil.com",
+      "emails": [
+        "sales@panchshil.com",
+        "info@panchshil.com",
+        "careers@panchshil.com"
+      ],
+      "phones": [
+        "+91 20 66473200",
+        "+91 22 66863939",
+        "1800 121 9900"
+      ],
+      "address": "",
+      "city": "",
+      "state": "",
+      "country": "",
+      "postal_code": "",
+      "sources": [],
+      "email": "sales@panchshil.com",
+      "company_number": "1800 121 9900",
+      "founder_name": "Nick Jones",
+      "founder_number": null,
+      "source_url": "https://www.panchshil.com/about",
+      "last_verified": "2026-08-09T09:36:30.085890+00:00",
+      "confidence": 0.8,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.panchshil.com/about"
+      ],
+      "created_at": "2026-08-09T08:55:41.644000",
+      "updated_at": "2026-08-09T09:36:30.085000"
+    },
+    {
+      "id": "6a78408d0cdd88461c232112",
+      "company_name": "Austinrealty",
+      "website": "https://austinrealty.in",
+      "emails": [
+        "enquiry@austinrealty.in"
+      ],
+      "phones": [
+        "+91 8308247777",
+        "765 661 3310",
+        "512.241.1300",
+        "512.306.1340"
+      ],
+      "address": "",
+      "city": "",
+      "state": "",
+      "country": "",
+      "postal_code": "",
+      "sources": [],
+      "email": "enquiry@austinrealty.in",
+      "company_number": "765 661 3310",
+      "founder_name": "Raju Bhise",
+      "founder_number": null,
+      "source_url": "https://austinrealty.in",
+      "last_verified": "2026-08-09T09:36:30.085890+00:00",
+      "confidence": 0.75,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://austinrealty.in"
+      ],
+      "created_at": "2026-08-09T08:55:41.644000",
+      "updated_at": "2026-08-09T09:36:30.085000"
+    },
+    {
+      "id": "6a78408d0cdd88461c232115",
+      "company_name": "Purplecorp",
+      "website": "https://purplecorp.in",
+      "emails": [
+        "info@purplecorp.in",
+        "recruitments2@purplecorp.in"
+      ],
+      "phones": [
+        "+91 89563 75981",
+        "+91 98200 10226",
+        "+91 9820 010",
+        "89563 75981",
+        "99234 80000"
+      ],
+      "address": "... University, Pune 411016. Contact Us. Enquiry: 020-6509 1000; Enquiry: 020-6509 1001; Enquiry: 020-6509 1002; Email: info@purplecorp.in. Quick Links. Home ...",
+      "city": "Pune",
+      "state": "",
+      "country": "India",
+      "postal_code": "411016",
+      "sources": [],
+      "email": "info@purplecorp.in",
+      "company_number": "89563 75981",
+      "founder_name": "Shravan Agarwal",
+      "founder_number": null,
+      "source_url": "https://purplecorp.in/about-us",
+      "last_verified": "2026-08-09T09:36:30.085890+00:00",
+      "confidence": 0.8,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://purplecorp.in/about-us"
+      ],
+      "created_at": "2026-08-09T08:55:41.644000",
+      "updated_at": "2026-08-09T09:36:30.085000"
+    },
+    {
+      "id": "6a7841230cdd88461c232118",
+      "company_name": "Vtprealty",
+      "website": "https://www.vtprealty.in",
+      "emails": [],
+      "phones": [
+        "+91 79 6929 2609",
+        "+91 2066899269"
+      ],
+      "address": "You can visit VTP Realty (Head Office) in Viman Nagar, Pune which is located Near Phoenix Mall, Behind Shakti Sports. You can also call them anytime between ...",
+      "city": "Pune",
+      "state": "Maharashtra",
+      "country": "India",
+      "postal_code": "411060",
+      "sources": [],
+      "email": null,
+      "company_number": "+91 2066899269",
+      "founder_name": "View Sachin",
+      "founder_number": null,
+      "source_url": "https://www.vtprealty.in",
+      "last_verified": "2026-08-09T09:36:30.085890+00:00",
+      "confidence": 0.45,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.vtprealty.in"
+      ],
+      "created_at": "2026-08-09T08:58:11.317000",
+      "updated_at": "2026-08-09T09:36:30.085000"
+    },
+    {
+      "id": "6a78456c0cdd88461c23211e",
+      "company_name": "Gera",
+      "website": "https://www.gera.in",
+      "emails": [
+        "companyaffairs@gera.in",
+        "corporaterelations@gera.in"
+      ],
+      "phones": [
+        "+91 20 6680 7700",
+        "+91 2026164000"
+      ],
+      "address": "Pune: Gera Developments Private Limited 200, Gera Plaza, Boat Club Road, Pune - 411 001, India. Tel: +91 20 6680 7700",
+      "city": "Pune",
+      "state": "Goa",
+      "country": "India",
+      "postal_code": "",
+      "sources": [],
+      "email": "companyaffairs@gera.in",
+      "company_number": "+91 20 6680 7700",
+      "founder_name": "Rohit Gera",
+      "founder_number": null,
+      "source_url": "https://www.gera.in",
+      "last_verified": "2026-08-09T09:36:30.085890+00:00",
+      "confidence": 0.8,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.gera.in"
+      ],
+      "created_at": "2026-08-09T09:16:28.375000",
+      "updated_at": "2026-08-09T09:36:30.085000"
+    }
+  ]
+}

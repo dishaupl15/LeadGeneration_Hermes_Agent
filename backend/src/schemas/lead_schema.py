@@ -199,19 +199,55 @@ class MongoLeadDoc(BaseModel):
 
     _id is serialized to 'id' (string) before returning to the frontend.
     All fields use the same names as the MongoDB document — no mapping needed.
+
+    Legacy fields (emails, phones, website, etc.) are kept unchanged so old
+    documents without the enriched fields continue to deserialise correctly.
+    New enriched fields are all Optional with safe defaults.
     """
 
     id:           str       = Field(..., example="64f1a2b3c4d5e6f7a8b9c0d1")
     company_name: str       = Field(default="")
     website:      str       = Field(default="")
+
+    # ── Legacy contact arrays (kept for backward compat) ──────────────────
     emails:       list[str] = Field(default_factory=list)
     phones:       list[str] = Field(default_factory=list)
+
+    # ── Address fields ─────────────────────────────────────────────────────
     address:      str       = Field(default="")
     city:         str       = Field(default="")
     state:        str       = Field(default="")
     country:      str       = Field(default="")
     postal_code:  str       = Field(default="")
     sources:      list[str] = Field(default_factory=list)
+
+    # ── Enriched contact fields (new — None on old documents) ─────────────
+    email:          Optional[str]   = Field(default=None,
+                                            description="Best single validated business email")
+    company_number: Optional[str]   = Field(default=None,
+                                            description="Best single business/switchboard phone")
+    founder_name:   Optional[str]   = Field(default=None,
+                                            description="Publicly listed founder/CEO name")
+    founder_number: Optional[str]   = Field(default=None,
+                                            description="Publicly listed founder professional number")
+    source_url:     Optional[str]   = Field(default=None,
+                                            description="URL where the lead/contact was found")
+    last_verified:  Optional[str]   = Field(default=None,
+                                            description="UTC ISO timestamp of last successful enrichment")
+    confidence:     float           = Field(default=0.0,
+                                            description="Evidence-based confidence score 0.0–1.0")
+
+    # ── Hermes source trace ────────────────────────────────────────────────
+    research_source:  Optional[str]       = Field(
+        default=None,
+        description="Research engine that generated this lead (e.g. 'hermes')"
+    )
+    research_sources: list[str]           = Field(
+        default_factory=list,
+        description="URLs of pages Hermes researched to build this lead"
+    )
+
+    # ── Audit timestamps ───────────────────────────────────────────────────
     created_at:   Optional[str] = Field(default=None)
     updated_at:   Optional[str] = Field(default=None)
 
