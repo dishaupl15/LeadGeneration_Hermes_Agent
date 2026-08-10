@@ -23,12 +23,16 @@ Select an industry category → click Generate → the backend calls `leadgen.py
 ```
 Lead_Generation_Hermes_Agent/
 │
-├── src/                          # React frontend
-│   ├── components/               # UI components (table, buttons, search bar…)
-│   ├── pages/LeadGeneration.jsx  # Main page
-│   ├── hooks/useGenerateLeads.js # API state management hook
-│   ├── services/api.js           # All fetch calls (single source of truth)
-│   └── config/categories.js     # Industry categories config
+├── frontend/                    # React frontend app
+│   ├── src/                     # UI components (table, buttons, search bar…)
+│   │   ├── components/
+│   │   ├── pages/LeadGeneration.jsx
+│   │   ├── hooks/useGenerateLeads.js
+│   │   ├── services/api.js
+│   │   └── config/categories.js
+│   ├── package.json
+│   ├── vite.config.js
+│   └── index.html
 │
 ├── backend/
 │   ├── app/
@@ -81,6 +85,7 @@ cd Lead_Generation_Hermes_Agent
 ### 2. Frontend — install dependencies
 
 ```bash
+cd frontend
 npm install
 ```
 
@@ -101,36 +106,28 @@ pip install -r requirements.txt
 
 ### 4. Backend — configure environment variables
 
-Create `backend/.env` (copy from the template below):
+Create `backend/.env` by copying `.env.example`:
+
+```bash
+copy backend\.env.example backend\.env   # Windows
+# cp backend/.env.example backend/.env   # macOS / Linux
+```
+
+Then open `backend/.env` and fill in your API keys:
 
 ```env
 APP_NAME="Lead Generation CRM"
 APP_VERSION="1.0.0"
-
 PORT=8001
-
-# Comma-separated allowed frontend origins
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-
-# MongoDB connection string
 MONGODB_URI=mongodb://127.0.0.1:27017/crm
 
-# Path to leadgen.py (override if installed elsewhere)
-# LEADGEN_SCRIPT=C:\path\to\your\LeadGeneration\tools\leadgen.py
+# Get free keys at serper.dev and firecrawl.dev
+SERPER_API_KEY=your_serper_api_key_here
+FIRECRAWL_API_KEY=your_firecrawl_api_key_here
 ```
 
-### 5. Configure `leadgen.py` path
-
-Open `backend/app/services/hermes_service.py` and update `_default_script` to point to your `leadgen.py`:
-
-```python
-_default_script = r"C:\Users\YourName\LeadGeneration\tools\leadgen.py"
-```
-
-Or set the `LEADGEN_SCRIPT` environment variable in `.env` instead.
-
-> `leadgen.py` requires its own `.env` with `SERPER_API_KEY` and `FIRECRAWL_API_KEY`.  
-> Get keys at [serper.dev](https://serper.dev) and [firecrawl.dev](https://www.firecrawl.dev).
+> `leadgen.py` is already bundled at `backend/tools/leadgen.py` and reads these keys automatically from `backend/.env`. No extra setup needed.
 
 ---
 
@@ -148,13 +145,14 @@ venv\Scripts\activate           # Windows
 venv\Scripts\uvicorn app.main:app --port 8001 --reload
 ```
 
-Backend starts at `http://localhost:8001`  
-API docs available at `http://localhost:8001/docs`
+Backend starts at `http://localhost:8002`  
+API docs available at `http://localhost:8002/docs`
 
 **Terminal 2 — Frontend**
 
 ```bash
-# from project root
+# from frontend/
+cd frontend
 npm run dev
 ```
 

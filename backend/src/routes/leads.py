@@ -110,6 +110,7 @@ def get_categories():
     "/leads/generate-leads",
     summary="Generate B2B leads via Serper + Firecrawl (NO Hermes), upsert to MongoDB",
     response_model=MongoLeadsResponse,
+    response_model_exclude_none=False,
     status_code=status.HTTP_200_OK,
     tags=["Leads"],
 )
@@ -200,10 +201,16 @@ async def generate_leads(payload: GenerateLeadsRequest):
         avg_score = round(sum(scores) / len(scores), 2) if scores else 0.0
         _log("CONFIDENCE", f"Done — avg_score={avg_score}")
 
-        # ── ENRICH — verify_service already ran comprehensive founder searches  ──
-        # during discovery (verify_company per-company).  We do NOT re-run
-        # blocking Serper calls here.  Just validate any founder name that was
-        # set, and log the result.
+        # ── ENRICH — waterfall multi-source enrichment ──────────────────────
+        # Run Hunter / Apollo / PDL / Google Places waterfalls concurrently.
+        # Each field (email, founder, phone, address) follows its own waterfall
+        # and stops as soon as a verified value is obtained.
+        # If no API keys are configured, this stage is a fast no-op.
+        from app.services.enrichment_service import enrich_all_companies
+        pipeline_companies = await enrich_all_companies(pipeline_companies)
+
+        # ── Post-enrich founder name validation ───────────────────────────────
+        # Reject any implausible names set by external providers.
         _log("ENRICH", f"Post-verify founder validation for {len(pipeline_companies)} companies")
         from app.services.verify_service import _is_plausible_person_name
         for c in pipeline_companies:
@@ -309,26 +316,31 @@ async def generate_leads(payload: GenerateLeadsRequest):
         has_contact = bool(email or company_number)
         last_verified = now.isoformat() if has_contact else None
 
+        # Preserve _field_verification so the audit script can read
+        # which provider contributed each field (Hunter, Apollo, PDL, etc.)
+        field_verification = company.get("_field_verification") or {}
+
         set_fields: dict = {
-            "company_name":    company.get("company_name", ""),
-            "website":         website,
-            "emails":          company.get("emails", []),
-            "phones":          company.get("phones", []),
-            "address":         company.get("address", ""),
-            "city":            company.get("city", ""),
-            "state":           company.get("state", ""),
-            "country":         company.get("country", ""),
-            "postal_code":     company.get("postal_code", ""),
-            "sources":         company.get("sources", []),
-            "updated_at":      now,
-            "email":           email,
-            "company_number":  company_number,
-            "founder_name":    founder_name,
-            "founder_number":  founder_number,
-            "source_url":      source_url,
-            "confidence":      confidence,
-            "research_source":  research_src,
-            "research_sources": rsources,
+            "company_name":       company.get("company_name", ""),
+            "website":            website,
+            "emails":             company.get("emails", []),
+            "phones":             company.get("phones", []),
+            "address":            company.get("address", ""),
+            "city":               company.get("city", ""),
+            "state":              company.get("state", ""),
+            "country":            company.get("country", ""),
+            "postal_code":        company.get("postal_code", ""),
+            "sources":            company.get("sources", []),
+            "updated_at":         now,
+            "email":              email,
+            "company_number":     company_number,
+            "founder_name":       founder_name,
+            "founder_number":     founder_number,
+            "source_url":         source_url,
+            "confidence":         confidence,
+            "research_source":    research_src,
+            "research_sources":   rsources,
+            "_field_verification": field_verification,
         }
         if last_verified:
             set_fields["last_verified"] = last_verified
@@ -393,6 +405,8 @@ async def generate_leads(payload: GenerateLeadsRequest):
     n_phone   = sum(1 for c in unique if c.get("company_number"))
     n_address = sum(1 for c in unique if c.get("address"))
     n_founder = sum(1 for c in unique if c.get("founder_name"))
+    from app.services.enrichment_service import get_stats as _get_enrich_stats
+    wf = _get_enrich_stats()
     _log("LEADS", (
         f"COMPLETE in {elapsed}s | "
         f"returned={len(leads_out)} | "
@@ -402,11 +416,35 @@ async def generate_leads(payload: GenerateLeadsRequest):
         f"founder={n_founder}/{len(unique)} | "
         f"serper_calls={disc_stats.get('serper_calls',0)} | "
         f"firecrawl_calls={disc_stats.get('firecrawl_calls',0)} | "
+        f"hunter_calls={wf.get('hunter_calls',0)} | "
+        f"apollo_calls={wf.get('apollo_calls',0)} | "
+        f"pdl_calls={wf.get('pdl_calls',0)} | "
+        f"google_places_calls={wf.get('google_places_calls',0)} | "
         f"llm_calls=0 | "
         f"404_filtered={disc_stats.get('filtered_404',0)} | "
         f"duplicates={disc_stats.get('duplicates',0)} | "
         f"[NO HERMES CALLED]"
     ))
+
+    # ── Build pipeline statistics for audit tooling ──────────────────────
+    final_pipeline_stats = {
+        "serper_calls":        disc_stats.get("serper_calls", 0),
+        "firecrawl_calls":     disc_stats.get("firecrawl_calls", 0),
+        "hunter_calls":        wf.get("hunter_calls", 0),
+        "apollo_calls":        wf.get("apollo_calls", 0),
+        "pdl_calls":           wf.get("pdl_calls", 0),
+        "google_places_calls": wf.get("google_places_calls", 0),
+        "hunter_hits":         wf.get("hunter_hits", 0),
+        "apollo_hits":         wf.get("apollo_hits", 0),
+        "pdl_hits":            wf.get("pdl_hits", 0),
+        "google_places_hits":  wf.get("google_places_hits", 0),
+        "cache_hits":          wf.get("cache_hits", 0),
+        "llm_calls":           0,
+        "hermes_calls":        0,
+        "filtered_404":        disc_stats.get("filtered_404", 0),
+        "duplicates":          disc_stats.get("duplicates", 0),
+        "elapsed_seconds":     elapsed,
+    }
 
     return MongoLeadsResponse(
         success=True,
@@ -416,6 +454,7 @@ async def generate_leads(payload: GenerateLeadsRequest):
         query=discovery_result.get("query", query),
         timestamp=discovery_result.get("timestamp", now.isoformat()),
         leads=leads_out,
+        pipeline_stats=final_pipeline_stats,
     )
 
 

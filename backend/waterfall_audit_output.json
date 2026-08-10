@@ -1,0 +1,164 @@
+{
+  "success": true,
+  "inserted": 0,
+  "updated": 4,
+  "total": 4,
+  "query": "Real Estate companies in Pune",
+  "timestamp": "2026-08-09T19:37:34.331153+00:00",
+  "leads": [
+    {
+      "id": "6a7611280cdd88461c2320cc",
+      "company_name": "Kolte Patil Developers",
+      "website": "https://www.koltepatil.com",
+      "emails": [
+        "service@koltepatil.com",
+        "sales@koltepatil.com"
+      ],
+      "phones": [
+        "+91 20 6742 9200"
+      ],
+      "address": "Contact Us · Pune Office. 8th floor, City Bay, Dhole Patil Road, Pune - 411001 India. +91-20 6742 9200 · Bengaluru Office. Kolte Patil Developers Ltd, 121, The ...",
+      "city": "Pune",
+      "state": "",
+      "country": "India",
+      "postal_code": "411001",
+      "sources": [],
+      "email": "service@koltepatil.com",
+      "company_number": "+91 20 6742 9200",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://www.koltepatil.com",
+      "last_verified": "2026-08-09T19:37:34.335152+00:00",
+      "confidence": 0.75,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.koltepatil.com"
+      ],
+      "created_at": "2026-08-07T17:08:56.516000",
+      "updated_at": "2026-08-09T19:37:34.335000"
+    },
+    {
+      "id": "6a78408d0cdd88461c232110",
+      "company_name": "Nyati Group",
+      "website": "https://nyatigroup.com",
+      "emails": [
+        "mumbaisales@nyatigroup.com",
+        "marketing@nyatigroup.com",
+        "info@nyatigroup.com"
+      ],
+      "phones": [
+        "+919967996788",
+        "996 799 6788",
+        "+91 20 6686 3333"
+      ],
+      "address": "Corporate Office - Pune, 6th Floor, Nyati Unitree, Near Gunjan Theatre, Nagar Road, Yerwada, Pune - 411006, India.",
+      "city": "Pune",
+      "state": "",
+      "country": "India",
+      "postal_code": "411006",
+      "sources": [
+        "https://nyatigroup.com/",
+        "https://nyatigroup.com/contact-us",
+        "https://nyatigroup.com/contact",
+        "https://nyatigroup.com/about-us",
+        "https://nyatigroup.com/about",
+        "https://nyatigroup.com/leadership"
+      ],
+      "email": "mumbaisales@nyatigroup.com",
+      "company_number": "+91 20 6686 3333",
+      "founder_name": "Pranav Nyati",
+      "founder_number": null,
+      "source_url": "https://nyatigroup.com/contact-us",
+      "last_verified": "2026-08-09T19:37:34.335152+00:00",
+      "confidence": 1.0,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://nyatigroup.com/",
+        "https://nyatigroup.com/contact-us",
+        "https://nyatigroup.com/contact",
+        "https://nyatigroup.com/about-us",
+        "https://nyatigroup.com/about",
+        "https://nyatigroup.com/leadership"
+      ],
+      "created_at": "2026-08-09T08:55:41.644000",
+      "updated_at": "2026-08-09T19:37:34.335000"
+    },
+    {
+      "id": "6a78408d0cdd88461c232111",
+      "company_name": "Panchshil Realty",
+      "website": "https://www.panchshil.com",
+      "emails": [
+        "careers@panchshil.com",
+        "info@panchshil.com",
+        "sales@panchshil.com"
+      ],
+      "phones": [
+        "+918970007700",
+        "897 000 7700",
+        "+91 22 66863939",
+        "+91 20 66473200",
+        "+971 04 545 3481"
+      ],
+      "address": ". Tech Park One, Tower E, 191 Yerwada, Pune - 411 006. India. +91 20 66473200. Mumbai Office. Express Towers, 20th Floor, Nariman Point, Mumbai ...",
+      "city": "Pune",
+      "state": "Maharashtra",
+      "country": "India",
+      "postal_code": "411006",
+      "sources": [
+        "https://www.panchshil.com/",
+        "https://www.panchshil.com/contact-us",
+        "https://www.panchshil.com/contact",
+        "https://www.panchshil.com/about-us"
+      ],
+      "email": "careers@panchshil.com",
+      "company_number": "+91 22 66863939",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://www.panchshil.com/contact-us",
+      "last_verified": "2026-08-09T19:37:34.335152+00:00",
+      "confidence": 1.0,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://www.panchshil.com/",
+        "https://www.panchshil.com/contact-us",
+        "https://www.panchshil.com/contact",
+        "https://www.panchshil.com/about-us"
+      ],
+      "created_at": "2026-08-09T08:55:41.644000",
+      "updated_at": "2026-08-09T19:37:34.335000"
+    },
+    {
+      "id": "6a78408d0cdd88461c232115",
+      "company_name": "Purplecorp",
+      "website": "https://purplecorp.in",
+      "emails": [
+        "info@purplecorp.in"
+      ],
+      "phones": [
+        "+91 98200 10226",
+        "+91 9820 010",
+        "99234 80000",
+        "98200 10226"
+      ],
+      "address": "... University, Pune 411016. Contact Us. Enquiry: 020-6509 1000; Enquiry: 020-6509 1001; Enquiry: 020-6509 1002; Email: info@purplecorp.in. Quick Links. Home ...",
+      "city": "Pune",
+      "state": "",
+      "country": "India",
+      "postal_code": "411016",
+      "sources": [],
+      "email": "info@purplecorp.in",
+      "company_number": "99234 80000",
+      "founder_name": null,
+      "founder_number": null,
+      "source_url": "https://purplecorp.in",
+      "last_verified": "2026-08-09T19:37:34.335152+00:00",
+      "confidence": 0.75,
+      "research_source": "serper_firecrawl",
+      "research_sources": [
+        "https://purplecorp.in"
+      ],
+      "created_at": "2026-08-09T08:55:41.644000",
+      "updated_at": "2026-08-09T19:37:34.335000"
+    }
+  ]
+}

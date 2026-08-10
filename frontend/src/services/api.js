@@ -7,7 +7,7 @@
  *  - Components stay clean and testable
  */
 
-const BASE_URL = 'http://localhost:8001'
+const BASE_URL = 'http://localhost:8002'
 
 /**
  * Shared fetch wrapper.
@@ -22,9 +22,10 @@ const BASE_URL = 'http://localhost:8001'
 async function apiFetch(path, opts = {}) {
   const url = `${BASE_URL}${path}`
 
-  // 5-minute timeout — lead generation takes 60-120s (Serper + Firecrawl scraping)
+  // 10-minute timeout — with 10 companies × 6 pages each, the pipeline can
+  // take 4–8 minutes (Serper + Firecrawl scraping + Enrich + Verify stages).
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 5 * 60 * 1000)
+  const timer = setTimeout(() => controller.abort(), 10 * 60 * 1000)
 
   let response
   try {
@@ -36,7 +37,7 @@ async function apiFetch(path, opts = {}) {
   } catch (networkError) {
     clearTimeout(timer)
     if (networkError.name === 'AbortError') {
-      throw new Error('Request timed out after 5 minutes. The backend may still be processing.')
+      throw new Error('Request timed out after 10 minutes. The backend may still be processing.')
     }
     throw new Error(
       `Cannot reach the server. Make sure the backend is running on ${BASE_URL}`

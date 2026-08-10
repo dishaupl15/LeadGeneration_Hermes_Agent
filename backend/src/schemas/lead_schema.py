@@ -251,8 +251,16 @@ class MongoLeadDoc(BaseModel):
     created_at:   Optional[str] = Field(default=None)
     updated_at:   Optional[str] = Field(default=None)
 
+    # ── Field-level evidence model ─────────────────────────────────────────
+    # Internal waterfall metadata: which provider contributed each field.
+    # Stored in MongoDB so audit tools can show provider breakdown.
+    # Shape: {"email": {"value": "...", "source": "hunter", "status": "hunter_valid"}, ...}
+    # Note: stored in MongoDB as "_field_verification" but exposed here without leading underscore.
+    field_verification: Optional[dict] = Field(default=None, alias="_field_verification")
+
     class Config:
-        extra = "allow"   # tolerate any extra fields stored in MongoDB
+        extra = "allow"                # tolerate any extra fields stored in MongoDB
+        populate_by_name = True        # allow both alias and field name
 
 
 class MongoLeadsResponse(BaseModel):
@@ -270,6 +278,15 @@ class MongoLeadsResponse(BaseModel):
     query:     str              = Field(..., example="Real estate companies in Pune")
     timestamp: str              = Field(..., example="2026-08-06T12:00:00+00:00")
     leads:     list[MongoLeadDoc] = Field(default_factory=list)
+
+    # Pipeline statistics exposed for audit tooling
+    # Shape: {serper_calls, firecrawl_calls, hunter_calls, apollo_calls,
+    #          pdl_calls, google_places_calls, llm_calls, hermes_calls,
+    #          elapsed_seconds, ...}
+    pipeline_stats: Optional[dict] = Field(
+        default=None,
+        description="Provider call counts and execution statistics from the pipeline run",
+    )
 
 
 # ── Utility schemas ───────────────────────────────────────────────────────────

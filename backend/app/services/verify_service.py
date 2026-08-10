@@ -58,6 +58,7 @@ _HONORIFICS = frozenset({
     "late", "mr", "mrs", "ms", "dr", "prof", "sir", "shri", "smt",
     "executive", "managing", "chief", "senior", "junior",
     "vice", "deputy", "assistant", "additional", "associate",
+    "joint", "group", "whole", "non", "independent",   # ← added joint/group/whole
     "the", "our", "your", "view", "see", "meet", "about",
     "director",   # "Executive Director" should be rejected as a NAME
     "head", "team", "leadership", "regulatory", "authority",
@@ -98,23 +99,62 @@ _INDIAN_PHONE_RE = re.compile(
 )
 
 def _is_indian_number(phone: str) -> bool:
-    digits = re.sub(r'\D', '', phone)
-    if digits.startswith("91") and len(digits) == 12:
+    """
+    Return True only for numbers that are unambiguously Indian.
+
+    Rules (in order):
+    1. Explicit +91 prefix → Indian if 12 digits total.
+    2. 1800-XXXXXXX → Indian toll-free.
+    3. STD landline: starts with 0, 10–12 digits.
+    4. Mobile: exactly 10 digits starting with 6, 7, 8, or 9
+       AND the raw string starts with +91 or 0 — bare 10-digit
+       numbers WITHOUT a country code prefix are NOT accepted as
+       Indian because a US number like "6179256300" is indistinguishable
+       from an Indian mobile by digit count + first-digit alone.
+    """
+    stripped = phone.strip()
+    digits = re.sub(r'\D', '', stripped)
+
+    # Explicit +91 — 12 digits
+    if stripped.startswith("+91") and len(digits) == 12:
         return True
-    if digits.startswith("1800"):
+
+    # Indian toll-free 1800-xxx-xxxx
+    if digits.startswith("1800") and len(digits) >= 11:
         return True
-    if len(digits) == 10 and digits[0] in "6789":
-        return True
+
+    # STD landline: 0XX-XXXXXXXX
     if digits.startswith("0") and 10 <= len(digits) <= 12:
         return True
+
+    # Mobile: must have explicit country code or STD prefix in raw text
+    # bare 10-digit numbers (no leading 0 or +91) are NOT accepted
+    if len(digits) == 10 and digits[0] in "6789":
+        # Only accept if the raw string had +91 or 0 prefix, or contains a space
+        # that implies it was formatted as an Indian number
+        if stripped.startswith("+91") or stripped.startswith("0"):
+            return True
+        # Also accept if originally written as "+91 XXXXX XXXXX" (spaces stripped)
+        if "91" in stripped and stripped.index("91") < 4:
+            return True
+        # Otherwise reject — could be a US area-code number
+        return False
+
     return False
 
 def _is_foreign_number(phone: str) -> bool:
-    if phone.strip().startswith("+") and not phone.strip().startswith("+91"):
+    """Return True for numbers that are clearly non-Indian international numbers."""
+    stripped = phone.strip()
+    # Any +XX prefix that is NOT +91
+    if stripped.startswith("+") and not stripped.startswith("+91"):
         return True
-    digits = re.sub(r'\D', '', phone)
+    digits = re.sub(r'\D', '', stripped)
+    # US/Canada: +1 → 11 digits starting with 1, not 1800
     if digits.startswith("1") and len(digits) == 11 and not digits.startswith("1800"):
-        return True  # US/Canada +1
+        return True
+    # US-style (NXX) NXX-XXXX bracket format
+    if re.match(r'^\(\d{3}\)', stripped):
+        return True
     return False
 
 def _domain_of(url: str) -> str:
@@ -150,12 +190,15 @@ async def _serper(
     """Return list of {title, link, snippet} from Serper. Empty on failure."""
     if not SERPER_API_KEY:
         return []
+    if not q or not q.strip():
+        return []
+    safe_n = max(1, min(n, 100))
     async with sem:
         try:
             resp = await client.post(
                 SERPER_URL,
                 headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-                content=json.dumps({"q": q, "num": n}).encode(),
+                json={"q": q.strip(), "num": safe_n},
                 timeout=_T_SERPER,
             )
             resp.raise_for_status()
