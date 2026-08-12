@@ -75,8 +75,8 @@ def get_categories():
 
 
 @router.post(
-    "/generate-leads",
-    summary="Generate leads using AI",
+    "/stub/generate-leads",
+    summary="(STUB) Generate leads using AI — Phase 1 dummy endpoint",
     response_model=GenerateLeadsResponse,
     status_code=status.HTTP_200_OK,
 )
@@ -84,9 +84,11 @@ def generate_leads(payload: GenerateLeadsRequest):
     """
     Generate B2B leads for a specific industry and city.
 
-    **Phase 1**: Returns static dummy data for testing the frontend integration.
-    **Phase 2**: Will integrate with Hermes AI to generate real leads from web scraping,
-    business directories, and enrichment APIs.
+    **Phase 1**: Returns static dummy data for manual testing.
+    NOTE: This stub has been moved to `/leads/stub/generate-leads` so it does NOT
+    accidentally shadow the production `/leads/generate-leads` route. Use the
+    production pipeline by running the application entrypoint that includes
+    `src.routes.leads` (app/main.py).
 
     Args:
         payload: Industry, city, and count of leads to generate

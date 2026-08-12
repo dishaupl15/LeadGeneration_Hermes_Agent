@@ -409,17 +409,52 @@ async def verify_email(
     merged_markdown: str,
     client: httpx.AsyncClient,
     sem: asyncio.Semaphore,
+    ce_enriched: bool = False,
 ) -> tuple[Optional[str], str, str]:
     """
     Verify email belongs to this company.
 
+    For CE-enriched companies (`ce_enriched=True`) the email came directly
+    from CompanyEnrich /people/email — it is authoritative.  We normalize
+    mailto:/markdown wrappers and accept it unconditionally as long as it
+    has a valid structure (contains @).  Domain-mismatch rejection is
+    SKIPPED for CE emails because CE sometimes returns an email on a
+    slightly different TLD (.in vs .com) for the same company.
+
+    For Serper/Firecrawl candidates the full domain check applies.
+
     Returns (verified_email_or_None, source_url, status).
-    status: "verified_domain" | "found_gap" | "rejected_domain" | "not_found"
+    status: "verified_domain" | "verified_ce" | "found_gap" | "rejected_domain" | "not_found"
     """
     # ── Check existing emails already extracted from scraped pages ────────────
     if candidate:
+        # Normalize mailto:/markdown wrappers before domain check (Req 3)
+        _mailto_m = re.match(r'^\[.*?\]\(mailto:([^)]+)\)$', candidate)
+        if _mailto_m:
+            candidate = _mailto_m.group(1).strip().lower()
+        elif candidate.lower().startswith('mailto:'):
+            candidate = candidate[7:].strip().lower()
+
+        # Structural sanity — must contain @
+        if '@' not in candidate:
+            return None, "", "rejected_no_at_sign"
+
+        # CE-verified email: accept unconditionally — CE is authoritative
+        if ce_enriched:
+            _log_fn = lambda msg: None  # no-op; caller logs CE emails already
+            return candidate, "companyenrich.com", "verified_ce"
+
         email_dom = candidate.split("@")[-1].lower()
-        if email_dom == domain or email_dom.endswith("." + domain):
+        # Accept if domain matches exactly, is a subdomain, or shares the same
+        # root label (handles .com vs .in TLD variants for the same company)
+        domain_root = domain.split(".")[0] if domain else ""
+        email_root  = email_dom.split(".")[0] if email_dom else ""
+        domain_ok = (
+            email_dom == domain
+            or email_dom.endswith("." + domain)
+            or (domain_root and email_root and domain_root == email_root)
+        )
+        if domain_ok:
             return candidate, "scraped_pages", "verified_domain"
         else:
             # Domain mismatch — reject this email
@@ -701,6 +736,12 @@ async def verify_company(company: dict, sem: asyncio.Semaphore) -> dict:
     adds a `_field_verification` dict for audit/logging.
 
     Never fabricates data — a field is set to None if verification fails.
+
+    CE-enriched companies (_ce_enriched=True):
+      - email is passed to verify_email with ce_enriched=True so it is
+        accepted unconditionally (CE is the authoritative source).
+      - If verify_email still returns None for any reason, the original
+        CE email is restored so it is never silently lost.
     """
     client = _get_client()
 
@@ -712,6 +753,7 @@ async def verify_company(company: dict, sem: asyncio.Semaphore) -> dict:
     address  = company.get("address", "")
     founder  = company.get("founder_name")
     md       = company.get("_merged_markdown", "")
+    is_ce    = bool(company.get("_ce_enriched"))
 
     # ── Company name cleanup (synchronous — no Serper call needed) ────────────
     og_name      = ""
@@ -733,7 +775,9 @@ async def verify_company(company: dict, sem: asyncio.Semaphore) -> dict:
         verify_founder(clean_name, domain, founder, md, client, sem)
     )
     email_task = asyncio.create_task(
-        verify_email(clean_name, domain, email, md, client, sem)
+        # Pass ce_enriched=True for CE companies — email is authoritative from CE
+        # and must not be rejected on domain-mismatch grounds.
+        verify_email(clean_name, domain, email, md, client, sem, ce_enriched=is_ce)
     )
     phone_task = asyncio.create_task(
         verify_phone(clean_name, domain, phone, phones, md, client, sem)
@@ -743,6 +787,30 @@ async def verify_company(company: dict, sem: asyncio.Semaphore) -> dict:
     (v_email,   email_src,   email_status),   \
     (v_phone,   phone_src,   phone_status)    \
         = await asyncio.gather(founder_task, email_task, phone_task)
+
+    # ── CE email guard: never discard a CE-verified email ────────────────────
+    # verify_email returns None when the domain doesn't match scraped pages.
+    # For CE companies the email came directly from CompanyEnrich /people/email
+    # and is authoritative — restore it if verification cleared it.
+    if is_ce and v_email is None and email:
+        # Normalize mailto:/markdown wrappers before restoring
+        _ce_email = email.strip()
+        _m = re.match(r'^\[.*?\]\(mailto:([^)]+)\)$', _ce_email)
+        if _m:
+            _ce_email = _m.group(1).strip().lower()
+        elif _ce_email.lower().startswith('mailto:'):
+            _ce_email = _ce_email[7:].strip().lower()
+        else:
+            _ce_email = _ce_email.lower()
+        if '@' in _ce_email:
+            v_email    = _ce_email
+            email_src  = "companyenrich.com"
+            email_status = "verified_ce_restored"
+            import sys
+            print(
+                f"[verify_company] CE email restored for {clean_name!r}: {v_email!r}",
+                file=sys.stderr, flush=True
+            )
 
     # ── Address verification (synchronous) ───────────────────────────────────
     v_address, addr_status = verify_address_local(address, domain)
@@ -804,7 +872,10 @@ async def verify_company(company: dict, sem: asyncio.Semaphore) -> dict:
         updated["phones"] = [v_phone] + [p for p in updated.get("phones", []) if p != v_phone]
     if not v_email:
         updated["email_status"] = "not_publicly_found"
-        updated["emails"] = []
+        # CE: do NOT wipe the emails list — it carries the CE-authoritative address.
+        # For Serper/Firecrawl candidates with no verified email, clear the list.
+        if not is_ce:
+            updated["emails"] = []
     if not v_phone:
         updated["phone_status"] = "not_publicly_found"
 

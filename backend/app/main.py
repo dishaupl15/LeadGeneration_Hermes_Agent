@@ -23,6 +23,10 @@ from src.config import settings
 from src.config.mongo import connect_db, close_db
 from src.routes import leads_router
 from src.schemas import MessageResponse
+from google_maps.routes import router as google_maps_router
+from people_data_labs.routes import router as pdl_router
+from prospeo.routes import router as prospeo_router
+from contactout.routes import router as contactout_router
 
 
 # ── Lifespan: connect DB on startup, close on shutdown ───────────────────────
@@ -56,6 +60,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1):(5173|5174)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,6 +69,18 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 # No prefix here — each route carries its full path (/leads/..., /debug/...)
 app.include_router(leads_router)
+
+# ── Google Maps leads module (isolated — does NOT touch existing pipeline) ────
+app.include_router(google_maps_router)
+
+# ── People Data Labs contact discovery (isolated — does NOT touch pipeline) ───
+app.include_router(pdl_router)
+
+# ── Prospeo people enrichment (standalone — does NOT touch existing pipeline) ─
+app.include_router(prospeo_router)
+
+# ── ContactOut people enrichment (standalone — does NOT touch existing pipeline) ─
+app.include_router(contactout_router)
 
 
 # ── Health endpoints ──────────────────────────────────────────────────────────

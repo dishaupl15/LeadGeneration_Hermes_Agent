@@ -44,12 +44,19 @@ class LeadUpdateRequest(BaseModel):
 
 class GenerateLeadsRequest(BaseModel):
     """
-    Request payload for Hermes-powered lead generation.
+    Request payload for lead generation.
     POST /leads/generate-leads
 
-    Accepts either:
-      - query  : free-form natural language  (e.g. "Real estate companies in Pune")
-      - OR the legacy industry + city + count fields (still supported)
+    New (Google Maps-first pipeline):
+      - industry  : category/industry (required)
+      - state     : Indian state name (required for Google Maps discovery)
+      - district  : district/city within state (optional — searches whole state if absent)
+      - target    : number of companies to discover (default 50, max 500)
+
+    Legacy fields kept for backward compatibility:
+      - query : free-form natural language query (overrides industry+city if provided)
+      - city  : city/region (maps to district when state is also provided)
+      - count : number of leads (maps to target)
     """
 
     query: Optional[str] = Field(
@@ -57,43 +64,69 @@ class GenerateLeadsRequest(BaseModel):
         min_length=1,
         max_length=500,
         example="Real estate companies in Pune",
-        description="Natural-language search query sent to the Hermes agent",
+        description="Natural-language search query (legacy — prefer industry+state+district)",
     )
-    # Legacy fields kept for backward compatibility
+    # Primary fields for Google Maps pipeline
     industry: Optional[str] = Field(
         default=None,
         min_length=1,
         max_length=100,
-        example="Real Estate",
-        description="Target industry / category (legacy — prefer query)",
+        example="Construction",
+        description="Target industry / category",
     )
+    state: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        example="Maharashtra",
+        description="Indian state name for Google Maps geographic discovery",
+    )
+    district: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        example="Pune",
+        description="District/city within the state (optional — searches whole state if absent)",
+    )
+    target: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        example=50,
+        description="Target number of unique companies to discover (1–500)",
+    )
+    # Legacy fields kept for backward compatibility
     city: Optional[str] = Field(
         default=None,
         min_length=1,
         max_length=100,
         example="Pune",
-        description="City or region (legacy — prefer query)",
+        description="City or region (legacy — maps to district when state is provided)",
     )
     count: int = Field(
         default=10,
         ge=1,
         le=100,
         example=10,
-        description="Number of leads to generate (1 – 100)",
+        description="Number of leads to generate (legacy — use target instead)",
     )
 
     def resolved_query(self) -> str:
         """Return the effective query string regardless of which fields were sent."""
         if self.query:
-            return self.query
-        parts = []
-        if self.industry:
-            parts.append(self.industry)
-        if self.city:
-            parts.append(f"in {self.city}")
-        if not parts:
-            raise ValueError("Provide either 'query' or both 'industry' and 'city'.")
-        return " ".join(parts)
+            return self.query.strip()
+        if not self.industry:
+            raise ValueError("Provide either 'query' or 'industry'.")
+        # Use state+district if provided, else fall back to city (legacy)
+        location = self.district or self.state or self.city or ""
+        if location and location.strip():
+            return f"{self.industry.strip()} companies in {location.strip()}"
+        return self.industry.strip()
+
+    def resolved_target(self) -> int:
+        """Return the effective target count — `target` takes precedence over `count`."""
+        # If target was explicitly set (not default 50), use it.
+        # Otherwise use count if count was set (not default 10).
+        return self.target
 
 
 # ── Response schemas ──────────────────────────────────────────────────────────
@@ -237,15 +270,22 @@ class MongoLeadDoc(BaseModel):
     confidence:     float           = Field(default=0.0,
                                             description="Evidence-based confidence score 0.0–1.0")
 
-    # ── Hermes source trace ────────────────────────────────────────────────
+    # -- Source trace -----------------------------------------------------------
     research_source:  Optional[str]       = Field(
         default=None,
-        description="Research engine that generated this lead (e.g. 'hermes')"
+        description="Research engine that generated this lead (e.g. 'google_maps', 'companyenrich')"
     )
     research_sources: list[str]           = Field(
         default_factory=list,
-        description="URLs of pages Hermes researched to build this lead"
+        description="URLs of pages researched to build this lead"
     )
+
+    # -- Google Maps fields -------------------------------------------------------
+    place_id:        Optional[str]   = Field(default=None, description="Google Place ID")
+    google_maps_uri: Optional[str]   = Field(default=None, description="Google Maps link")
+    primary_type:    Optional[str]   = Field(default=None, description="Google primary place type")
+    latitude:        Optional[float] = Field(default=None)
+    longitude:       Optional[float] = Field(default=None)
 
     # ── Audit timestamps ───────────────────────────────────────────────────
     created_at:   Optional[str] = Field(default=None)

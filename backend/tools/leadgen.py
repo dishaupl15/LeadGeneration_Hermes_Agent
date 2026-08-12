@@ -1093,6 +1093,29 @@ def _pick_company_number(validated_phones: list[dict]) -> str:
     return best["number"]
 
 
+def _normalize_email(addr: str) -> str:
+    """
+    Strip mailto: prefix and markdown link wrappers from an email string.
+    e.g. "mailto:info@example.com"                       -> "info@example.com"
+         "[info@example.com](mailto:info@example.com)"   -> "info@example.com"
+    """
+    addr = addr.strip()
+    # Strip markdown link: [text](mailto:addr)
+    m = re.match(r'^\[.*?\]\(mailto:([^)]+)\)$', addr)
+    if m:
+        return m.group(1).strip().lower()
+    # Strip markdown link: [addr](url) where addr contains @
+    m = re.match(r'^\[([^\]]+)\]\([^)]*\)$', addr)
+    if m:
+        candidate = m.group(1).strip().lower()
+        if '@' in candidate:
+            return candidate
+    # Strip bare mailto: prefix
+    if addr.lower().startswith('mailto:'):
+        return addr[7:].strip().lower()
+    return addr.lower()
+
+
 def validate_contacts(company: dict) -> dict:
     """
     VALIDATE stage.
@@ -1108,17 +1131,44 @@ def validate_contacts(company: dict) -> dict:
 
     Original "emails" and "phones" keys are kept unchanged so callers that
     relied on them before this stage still work.
+
+    CE-VERIFIED EMAILS: If _ce_enriched=True and _field_verification.email
+    is verified, that email is preserved unconditionally at position 0 —
+    it bypasses junk filters because CompanyEnrich already validated it.
     """
     raw_emails: list[str] = company.get("emails", [])
     raw_phones: list[str] = company.get("phones", [])
+
+    # ── CE email preservation ──────────────────────────────────────────────
+    # CompanyEnrich-verified emails must never be cleared by junk filters.
+    ce_verified_email: str | None = None
+    if company.get("_ce_enriched"):
+        fv = company.get("_field_verification") or {}
+        ev = fv.get("email") or {}
+        if isinstance(ev, dict) and ev.get("verified") and ev.get("value"):
+            ce_verified_email = _normalize_email(str(ev["value"]))
+        # Also check top-level email field directly
+        if not ce_verified_email and company.get("email"):
+            ce_verified_email = _normalize_email(str(company["email"]))
+        # Validate it has @ before trusting it
+        if ce_verified_email and '@' not in ce_verified_email:
+            ce_verified_email = None
 
     # ── Validate emails ────────────────────────────────────────────────────
     validated_emails: list[str] = []
     rejected_emails:  list[dict] = []
 
+    # Seed with CE-verified email first so it is always position 0
+    if ce_verified_email:
+        validated_emails.append(ce_verified_email)
+
     for addr in raw_emails:
-        addr = addr.lower().strip()
+        addr = _normalize_email(addr)
         if not addr:
+            continue
+
+        # Skip if already added as CE-verified email
+        if addr == ce_verified_email:
             continue
 
         local, sep, domain_part = addr.partition("@")
@@ -1668,8 +1718,10 @@ def verify_company_data(company: dict) -> dict:
     markdown that is already stored in the company dict under _scraped_pages
     and _merged_markdown.  No new HTTP/API calls are made.
 
-    For each verifiable field, the function checks whether the value can be
-    found verbatim in an official company page.
+    CE-ENRICHED COMPANIES (_ce_enriched=True) have no scraped pages.
+    For these, verification is based entirely on _field_verification populated
+    by CompanyEnrich — no scraped-page check is performed.
+    last_verified is set if CE verified email or phone.
 
     Returns the company dict with these additions/updates:
 
@@ -1682,6 +1734,82 @@ def verify_company_data(company: dict) -> dict:
                             (clamped to 1.0)
     """
     from datetime import datetime, timezone
+
+    # ── CE fast path: skip scraped-page verification ───────────────────────
+    # CE companies have _scraped_pages=[] so checking email against pages
+    # always returns verified=False, which clears last_verified and loses the
+    # confidence boost. Trust _field_verification from CompanyEnrich instead.
+    if company.get("_ce_enriched"):
+        fv_ce = company.get("_field_verification") or {}
+        verification: dict[str, dict] = {}
+        boost = 0.0
+        verified_contact_source: str | None = None
+
+        # Map CE fv keys to verification keys (CE stores phone as "phone",
+        # pipeline expects "company_number")
+        _CE_KEY_MAP = {
+            "email":          "email",
+            "phone":          "company_number",
+            "company_number": "company_number",
+            "founder":        "founder_name",
+            "founder_name":   "founder_name",
+            "founder_number": "founder_number",
+            "company_name":   "company_name",
+        }
+        seen_vkeys: set[str] = set()
+        for ce_key, vkey in _CE_KEY_MAP.items():
+            if vkey in seen_vkeys:
+                continue
+            entry = fv_ce.get(ce_key) or {}
+            is_verified = bool(isinstance(entry, dict) and entry.get("verified"))
+            src_url = (entry.get("source") or "") if isinstance(entry, dict) else ""
+            verification[vkey] = {"verified": is_verified, "source_url": src_url or None}
+            seen_vkeys.add(vkey)
+            if is_verified:
+                boost += _VERIFY_BOOST_PER_FIELD
+                if vkey in _VERIFIED_CONTACT_FIELDS and not verified_contact_source:
+                    verified_contact_source = src_url or company.get("website", "")
+
+        # Fallback: if top-level email/company_number exist but weren't in fv,
+        # mark them verified so last_verified gets set.
+        if not verification.get("email", {}).get("verified") and company.get("email"):
+            verification["email"] = {"verified": True, "source_url": company.get("website")}
+            boost += _VERIFY_BOOST_PER_FIELD
+            if not verified_contact_source:
+                verified_contact_source = company.get("website", "")
+        if not verification.get("company_number", {}).get("verified") and company.get("company_number"):
+            verification["company_number"] = {"verified": True, "source_url": company.get("website")}
+            boost += _VERIFY_BOOST_PER_FIELD
+            if not verified_contact_source:
+                verified_contact_source = company.get("website", "")
+
+        email_v = verification.get("email", {}).get("verified", False)
+        phone_v = verification.get("company_number", {}).get("verified", False)
+        last_verified_ce: str | None = (
+            datetime.now(timezone.utc).isoformat() if (email_v or phone_v) else None
+        )
+        source_url_ce = (
+            verified_contact_source
+            or company.get("source_url", "")
+            or company.get("website", "")
+            or None
+        )
+        existing_conf = company.get("confidence", 0.0)
+        new_conf = round(min(existing_conf + boost, 1.0), 2)
+        print(
+            f"         [Verify] CE fast-path — verified: "
+            f"{[k for k,v in verification.items() if v.get('verified')]}  "
+            f"confidence: {existing_conf} -> {new_conf}  "
+            f"last_verified: {'SET' if last_verified_ce else 'NOT SET'}",
+            file=sys.stderr,
+        )
+        return {
+            **company,
+            "verification":  verification,
+            "source_url":    source_url_ce,
+            "last_verified": last_verified_ce,
+            "confidence":    new_conf,
+        }
 
     pages = _pages_by_priority(company)
 

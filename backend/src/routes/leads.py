@@ -4,21 +4,28 @@ src/routes/leads.py
 Leads API router.
 
 Production flow for POST /leads/generate-leads:
-  UI → FastAPI → Serper discovery → Firecrawl research → contact-gap search
-  → NORMALIZE → VALIDATE → CONFIDENCE → ENRICH → VERIFY → DEDUPLICATE
-  → MongoDB → UI
+  UI → FastAPI → Google Maps discovery → CompanyEnrich → Serper → Firecrawl
+  → NORMALIZE → VALIDATE → CONFIDENCE
+  → [MONGODB PRE-DEDUP]  ← check existing leads by website/company_name
+  → INSERT new leads only (skip existing)
+  → return ONLY newly inserted leads to UI
 
-Hermes Desktop Agent is NOT called from this route under any circumstances.
+Category-wise storage:
+  Every generated lead is stored in a collection named leads_{category_slug}.
+  e.g.  Construction → leads_construction
+        Real Estate  → leads_real_estate
+  The 'categories' collection lists all known industry names (seeded on startup).
 
 Endpoints
 ---------
-GET    /leads/categories        list all industry categories
-POST   /leads/generate-leads    Serper+Firecrawl pipeline, upsert MongoDB, return docs
+GET    /leads/categories        list all industry categories (from DB)
+POST   /leads/generate-leads    pipeline → upsert MongoDB → return NEW leads only
 GET    /leads                   paginated list of stored leads
 POST   /leads                   create a lead manually
 GET    /leads/{lead_id}         fetch a single lead by ID
 PATCH  /leads/{lead_id}         partially update a lead
 DELETE /leads/{lead_id}         permanently delete a lead
+PATCH  /leads/{lead_id}/status  update CRM status for a lead
 GET    /debug/database          MongoDB connectivity + document count
 GET    /debug/sample            first 5 documents from the leads collection
 """
@@ -32,7 +39,14 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from src.config.mongo import COLLECTION_NAME, get_db
+from src.config.mongo import (
+    COLLECTION_NAME,
+    CATEGORIES_COLLECTION,
+    ALL_CATEGORIES,
+    get_db,
+    collection_for_category,
+    ensure_lead_indexes,
+)
 from src.controllers.lead_controller import LeadController, LeadNotFoundError
 from src.models.lead import Category
 from src.schemas.lead_schema import (
@@ -45,7 +59,6 @@ from src.schemas.lead_schema import (
     MessageResponse,
     MongoLeadsResponse,
 )
-from app.services.discovery_service import discover_leads
 
 router = APIRouter(
     tags=["Leads"],
@@ -67,11 +80,13 @@ def _ts() -> str:
 def _log(tag: str, msg: str) -> None:
     print(f"[{_ts()}] [{tag}] {msg}", flush=True)
 
+
 # ── Load leadgen pipeline module once at import time ─────────────────────────
 _LEADGEN_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "tools", "leadgen.py")
 )
 _leadgen_mod = None
+
 
 def _get_leadgen():
     global _leadgen_mod
@@ -90,7 +105,9 @@ def _get_leadgen():
         return None
 
 
-# ── Categories ────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /leads/categories
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get(
     "/leads/categories",
@@ -98,17 +115,34 @@ def _get_leadgen():
     response_model=list[str],
     tags=["Leads"],
 )
-def get_categories():
-    return LeadController.list_categories()
+async def get_categories():
+    """
+    Return all known industry category names.
+
+    Reads from the MongoDB 'categories' collection which is seeded on startup
+    with ALL_CATEGORIES from src/config/mongo.py.
+    Falls back to the static list if MongoDB is unreachable.
+    """
+    try:
+        db   = get_db()
+        coll = db[CATEGORIES_COLLECTION]
+        cursor = coll.find({}, {"name": 1, "_id": 0}).sort("name", 1)
+        docs   = await cursor.to_list(length=500)
+        names  = [d["name"] for d in docs if d.get("name")]
+        if names:
+            return names
+    except Exception:
+        pass
+    return ALL_CATEGORIES
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# POST /leads/generate-leads — main production endpoint
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /leads/generate-leads
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.post(
     "/leads/generate-leads",
-    summary="Generate B2B leads via Serper + Firecrawl (NO Hermes), upsert to MongoDB",
+    summary="Generate B2B leads via Google Maps pipeline, store by category, return only NEW leads",
     response_model=MongoLeadsResponse,
     response_model_exclude_none=False,
     status_code=status.HTTP_200_OK,
@@ -116,141 +150,111 @@ def get_categories():
 )
 async def generate_leads(payload: GenerateLeadsRequest):
     """
-    Production pipeline — Hermes Desktop Agent is NOT called.
+    Production pipeline — Google Maps is the FIRST discovery layer.
 
     Stages
     ------
-    [DISCOVERY]      Multi-query Serper → candidate company URLs
-    [FILTER]         Reject directories / social / Wikipedia / 404s
-    [FIRECRAWL]      Concurrent multi-page scrapes per company
-    [CONTACT_SEARCH] Gap-fill missing email/phone/address/founder via Serper
-    [EXTRACTION]     Per-company extraction summary log
-    [NORMALIZE]      Map to internal schema
-    [VALIDATE]       Reject junk emails/phones (leadgen.py)
-    [CONFIDENCE]     Score 0.0–1.0 per company (leadgen.py)
-    [ENRICH]         Founder discovery from official pages (leadgen.py)
-    [VERIFY]         Cross-check contacts vs scraped pages (leadgen.py)
-    [DEDUP]          Remove duplicate companies by domain/website
-    [MONGODB]        Upsert each unique company document
+    1. [DISCOVERY]   Google Maps Places API → unique companies
+    2. [ENRICH]      CompanyEnrich → Serper → Firecrawl (missing fields only)
+    3. [CONFIDENCE]  Score 0.0-1.0 per company
+    4. [ROUTE DEDUP] Remove within-batch duplicates by website domain
+    5. [DB DEDUP]    Query MongoDB: find which candidates already exist
+                     (by website URL or company_name as fallback)
+    6. [MONGODB]     Upsert ALL into leads_{category} collection
+                     (keeps data fresh even for existing leads)
+    7. [RESPONSE]    Return ONLY the newly inserted leads to the UI
+
+    Category storage
+    ----------------
+    Every lead is written to a collection named leads_{category_slug}:
+      Construction  → leads_construction
+      Real Estate   → leads_real_estate
+      FinTech       → leads_fintech
+    The 'categories' collection is updated with the industry name on every run.
     """
     t_start = time.monotonic()
-    _log("LEADS", "Request received — Hermes will NOT be called")
+    _log("LEADS", "Request received")
 
-    # ── Resolve query ─────────────────────────────────────────────────────────
-    try:
-        query = payload.resolved_query()
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    from app.services.companyenrich_service import reset_credits_flag
+    reset_credits_flag()
 
-    _log("LEADS", f"query={query!r}  count={payload.count}")
+    # ── Resolve request params ────────────────────────────────────────────────
+    import re as _re
+    industry = payload.industry or ""
+    state    = payload.state or ""
+    district = payload.district or payload.city or ""
+    target   = payload.resolved_target()
 
-    # ── DISCOVERY + FILTER + FIRECRAWL + CONTACT_SEARCH + EXTRACTION ─────────
-    try:
-        discovery_result = await discover_leads(query, num=payload.count)
-    except Exception as exc:
-        import traceback
-        traceback.print_exc()
-        _log("DISCOVERY", f"ERROR — {type(exc).__name__}: {exc!r}")
+    if payload.query and not industry:
+        query = payload.query.strip()
+        m = _re.match(r'^(.+?)\s+companies?\s+in\s+(.+)$', query, _re.IGNORECASE)
+        if m:
+            industry = m.group(1).strip()
+            if not state:
+                district = m.group(2).strip()
+    else:
+        try:
+            query = payload.resolved_query()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            )
+
+    if not industry:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Discovery pipeline error: {type(exc).__name__}: {exc}",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Provide 'industry' (and optionally 'state', 'district', 'target').",
+        )
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="'state' is required for lead generation (e.g. 'Maharashtra').",
         )
 
-    raw_companies: list[dict] = discovery_result.get("companies", [])
-    disc_stats = discovery_result.get("_stats", {})
-    _log("DISCOVERY", f"Returned {len(raw_companies)} companies from discovery")
+    query = f"{industry} companies in {district or state}, India"
+    _log("LEADS", f"industry={industry!r} state={state!r} district={district!r} target={target}")
 
-    # ── NORMALIZE (already done inside discover_leads; log confirmation) ──────
-    _log("NORMALIZE", f"Received {len(raw_companies)} normalized company dicts")
+    # ── Stage 1: Google Maps pipeline ─────────────────────────────────────────
+    _log("PIPELINE", "Starting Google Maps discovery")
+    from app.services.maps_pipeline_service import run_maps_pipeline, get_pipeline_stats
+    try:
+        maps_result = await run_maps_pipeline(
+            category=industry,
+            state=state,
+            district=district or None,
+            target=target,
+            exclude_seen=True,
+        )
+    except Exception as exc:
+        _log("DISCOVERY", f"Google Maps pipeline ERROR — {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
-    pipeline_companies = list(raw_companies)
-    lg = _get_leadgen()
+    pipeline_companies: list[dict] = maps_result.get("companies", [])
+    ps = maps_result.get("pipeline_stats", {})
+    _log("PIPELINE", f"Google Maps pipeline returned {len(pipeline_companies)} companies")
 
-    if lg is None:
-        _log("PIPELINE", "WARNING: leadgen.py not found — skipping VALIDATE/CONFIDENCE/ENRICH/VERIFY")
-    else:
-        # ── VALIDATE ──────────────────────────────────────────────────────────
-        _log("VALIDATE", f"Validating contacts for {len(pipeline_companies)} companies")
-        validated: list[dict] = []
-        total_email_rejected = 0
-        total_phone_rejected = 0
-        for c in pipeline_companies:
-            try:
-                vc = lg.validate_contacts(c)
-            except Exception as exc:
-                _log("VALIDATE", f"Warning for {c.get('company_name','?')}: {exc}")
-                vc = c
-            total_email_rejected += len(vc.get("rejected_emails", []))
-            total_phone_rejected += len(vc.get("rejected_phones", []))
-            validated.append(vc)
-        _log("VALIDATE", (
-            f"Done — emails_rejected={total_email_rejected}  "
-            f"phones_rejected={total_phone_rejected}"
-        ))
-        pipeline_companies = validated
+    if not pipeline_companies:
+        _log("LEADS", "No companies found — returning empty result")
+        return MongoLeadsResponse(
+            success=True,
+            inserted=0,
+            updated=0,
+            total=0,
+            query=query,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            leads=[],
+            pipeline_stats={
+                "google_maps_discovered": ps.get("google_maps_discovered", 0),
+                "google_maps_duplicates": ps.get("google_maps_duplicates", 0),
+                "companyenrich_calls":    ps.get("companyenrich_calls", 0),
+                "serper_calls":           ps.get("serper_calls", 0),
+                "firecrawl_calls":        ps.get("firecrawl_calls", 0),
+                "elapsed_seconds":        round(time.monotonic() - t_start, 1),
+            },
+        )
 
-        # ── CONFIDENCE ────────────────────────────────────────────────────────
-        _log("CONFIDENCE", f"Scoring {len(pipeline_companies)} companies")
-        for c in pipeline_companies:
-            if not c.get("confidence"):
-                try:
-                    c["confidence"] = lg.score_confidence(c)
-                except Exception:
-                    c["confidence"] = 0.0
-        scores = [c.get("confidence", 0.0) for c in pipeline_companies]
-        avg_score = round(sum(scores) / len(scores), 2) if scores else 0.0
-        _log("CONFIDENCE", f"Done — avg_score={avg_score}")
-
-        # ── ENRICH — waterfall multi-source enrichment ──────────────────────
-        # Run Hunter / Apollo / PDL / Google Places waterfalls concurrently.
-        # Each field (email, founder, phone, address) follows its own waterfall
-        # and stops as soon as a verified value is obtained.
-        # If no API keys are configured, this stage is a fast no-op.
-        from app.services.enrichment_service import enrich_all_companies
-        pipeline_companies = await enrich_all_companies(pipeline_companies)
-
-        # ── Post-enrich founder name validation ───────────────────────────────
-        # Reject any implausible names set by external providers.
-        _log("ENRICH", f"Post-verify founder validation for {len(pipeline_companies)} companies")
-        from app.services.verify_service import _is_plausible_person_name
-        for c in pipeline_companies:
-            name = c.get("company_name", "?")
-            fn   = c.get("founder_name")
-            if fn and not _is_plausible_person_name(fn):
-                _log("ENRICH", f"{name} — rejected implausible founder {fn!r}")
-                c["founder_name"] = None
-            else:
-                _log("ENRICH", f"{name} — founder={fn!r}")
-
-        # ── VERIFY ────────────────────────────────────────────────────────────
-        _log("VERIFY", f"Cross-checking contacts for {len(pipeline_companies)} companies")
-        verified: list[dict] = []
-        for c in pipeline_companies:
-            name = c.get("company_name", "?")
-            try:
-                vc = lg.verify_company_data(c)
-                vr = vc.get("verification", {})
-                _log("VERIFY", (
-                    f"{name} — "
-                    f"email={'✓' if vr.get('email',{}).get('verified') else '✗'}  "
-                    f"phone={'✓' if vr.get('company_number',{}).get('verified') else '✗'}  "
-                    f"confidence={vc.get('confidence', 0.0)}"
-                ))
-            except Exception as exc:
-                _log("VERIFY", f"Warning for {name}: {exc}")
-                vc = c
-            verified.append(vc)
-        pipeline_companies = verified
-
-        # ── DEDUP via leadgen ─────────────────────────────────────────────────
-        _log("DEDUP", f"Deduplicating {len(pipeline_companies)} companies via leadgen")
-        try:
-            pipeline_companies = lg.deduplicate_companies(pipeline_companies)
-        except Exception as exc:
-            _log("DEDUP", f"Warning: {exc}")
-        _log("DEDUP", f"After dedup: {len(pipeline_companies)} unique companies")
-
-    # ── Route-level dedup by website URL ─────────────────────────────────────
+    # ── Stage 4: Route-level dedup (within-batch) + cap ───────────────────────
     seen_websites: set[str] = set()
     unique: list[dict] = []
     for c in pipeline_companies:
@@ -260,7 +264,6 @@ async def generate_leads(payload: GenerateLeadsRequest):
         if key:
             seen_websites.add(key)
         else:
-            # Fall back to company name as dedup key
             key = c.get("company_name", "").lower().strip()
             if key and key in seen_websites:
                 continue
@@ -270,24 +273,115 @@ async def generate_leads(payload: GenerateLeadsRequest):
 
     _log("DEDUP", f"After route-level dedup: {len(unique)} unique companies")
 
-    # Cap at requested count — only return the best N valid companies
-    if len(unique) > payload.count:
-        # Sort by confidence descending so the best companies come first
+    if len(unique) > target:
         unique.sort(key=lambda c: c.get("confidence", 0.0), reverse=True)
-        unique = unique[: payload.count]
-        _log("DEDUP", f"Capped to requested count={payload.count}")
+        unique = unique[:target]
+        _log("DEDUP", f"Capped to target={target}")
 
-    # ── MONGODB upsert ────────────────────────────────────────────────────────
-    _log("MONGODB", f"Upserting {len(unique)} companies")
-    db         = get_db()
-    collection = db[COLLECTION_NAME]
-    now        = datetime.now(timezone.utc)
+    # ── MongoDB setup ─────────────────────────────────────────────────────────
+    db        = get_db()
+    coll_name = collection_for_category(industry)   # e.g. "leads_construction"
+    coll      = db[coll_name]
+    _log("MONGODB", f"Target collection: '{coll_name}' ({len(unique)} companies to process)")
+
+    # Ensure indexes exist for this category collection (non-fatal)
+    try:
+        await ensure_lead_indexes(db, industry)
+    except Exception as _idx_exc:
+        _log("MONGODB", f"Index warning (non-fatal): {_idx_exc}")
+
+    # Register this category in the categories collection
+    try:
+        cats_coll = db[CATEGORIES_COLLECTION]
+        await cats_coll.update_one(
+            {"name": industry},
+            {"$set": {"name": industry, "collection": coll_name}},
+            upsert=True,
+        )
+    except Exception as _cat_exc:
+        _log("MONGODB", f"Category register warning (non-fatal): {_cat_exc}")
+
+    # ── Stage 5: MongoDB pre-dedup ────────────────────────────────────────────
+    # Collect the identifiers we're about to process, then ask MongoDB which
+    # already exist.  This is a single bulk query — not one per company.
+    candidate_websites = [
+        c.get("website", "").lower().strip().rstrip("/")
+        for c in unique
+        if c.get("website", "").strip()
+    ]
+    candidate_names = [
+        c.get("company_name", "")
+        for c in unique
+        if c.get("company_name", "").strip()
+    ]
+
+    existing_websites: set[str] = set()
+    existing_names:    set[str] = set()
+
+    if candidate_websites:
+        async for doc in coll.find(
+            {"website": {"$in": candidate_websites}},
+            {"website": 1, "_id": 0},
+        ):
+            w = (doc.get("website") or "").lower().strip().rstrip("/")
+            if w:
+                existing_websites.add(w)
+
+    if candidate_names:
+        async for doc in coll.find(
+            {"company_name": {"$in": candidate_names}},
+            {"company_name": 1, "_id": 0},
+        ):
+            n = (doc.get("company_name") or "").lower().strip()
+            if n:
+                existing_names.add(n)
+
+    _log("DEDUP", (
+        f"MongoDB pre-check → {len(existing_websites)} existing websites, "
+        f"{len(existing_names)} existing names in '{coll_name}'"
+    ))
+
+    # Classify each company as NEW or DUPLICATE
+    new_companies:  list[dict] = []
+    dupe_companies: list[dict] = []
+    for c in unique:
+        w = (c.get("website") or "").lower().strip().rstrip("/")
+        n = (c.get("company_name") or "").lower().strip()
+        is_dup = (w and w in existing_websites) or (not w and n and n in existing_names)
+        if is_dup:
+            dupe_companies.append(c)
+        else:
+            new_companies.append(c)
+
+    _log("DEDUP", (
+        f"New leads to insert: {len(new_companies)} | "
+        f"Already in DB (will update silently, NOT returned to UI): {len(dupe_companies)}"
+    ))
+
+    # ── Stage 6: MongoDB upsert (ALL companies — keeps data fresh) ───────────
+    now            = datetime.now(timezone.utc)
     inserted_count = 0
     updated_count  = 0
-    upserted_keys: list[str] = []
+
+    # Track keys for newly inserted docs so we can fetch them back
+    new_website_keys: list[str] = []
+    new_name_keys:    list[str] = []
+
+    # Social-media domain filter (applied to research_sources list)
+    _SOCIAL_DOMS = frozenset({
+        "instagram.com", "facebook.com", "linkedin.com", "twitter.com",
+        "x.com", "youtube.com", "tiktok.com", "pinterest.com",
+    })
+
+    def _is_official_source(u: str) -> bool:
+        try:
+            d = urlparse(u).netloc.lower().lstrip("www.")
+            return not any(d == s or d.endswith("." + s) for s in _SOCIAL_DOMS)
+        except Exception:
+            return True
 
     for company in unique:
-        website        = company.get("website", "").strip()
+        website        = (company.get("website") or "").strip()
         email          = company.get("email")
         company_number = company.get("company_number")
         founder_name   = company.get("founder_name")
@@ -296,51 +390,44 @@ async def generate_leads(payload: GenerateLeadsRequest):
         confidence     = company.get("confidence", 0.0)
         research_src   = company.get("research_source", "serper_firecrawl")
         rsources       = list(company.get("research_sources") or [])
-
-        # Strip social-media / non-official URLs from research_sources
-        # These can leak in via the ENRICH stage's Serper results
-        _SOCIAL_DOMS = frozenset({
-            "instagram.com", "facebook.com", "linkedin.com", "twitter.com",
-            "x.com", "youtube.com", "tiktok.com", "pinterest.com",
-        })
-        def _is_official_source(u: str) -> bool:
-            try:
-                d = urlparse(u).netloc.lower().lstrip("www.")
-                return not any(d == s or d.endswith("." + s) for s in _SOCIAL_DOMS)
-            except Exception:
-                return True
-        rsources = [u for u in rsources if _is_official_source(u)]
+        rsources       = [u for u in rsources if _is_official_source(u)]
         if source_url and source_url not in rsources and _is_official_source(source_url):
             rsources = [source_url] + rsources
 
-        has_contact = bool(email or company_number)
+        has_contact   = bool(email or company_number)
         last_verified = now.isoformat() if has_contact else None
-
-        # Preserve _field_verification so the audit script can read
-        # which provider contributed each field (Hunter, Apollo, PDL, etc.)
         field_verification = company.get("_field_verification") or {}
 
         set_fields: dict = {
-            "company_name":       company.get("company_name", ""),
-            "website":            website,
-            "emails":             company.get("emails", []),
-            "phones":             company.get("phones", []),
-            "address":            company.get("address", ""),
-            "city":               company.get("city", ""),
-            "state":              company.get("state", ""),
-            "country":            company.get("country", ""),
-            "postal_code":        company.get("postal_code", ""),
-            "sources":            company.get("sources", []),
-            "updated_at":         now,
-            "email":              email,
-            "company_number":     company_number,
-            "founder_name":       founder_name,
-            "founder_number":     founder_number,
-            "source_url":         source_url,
-            "confidence":         confidence,
-            "research_source":    research_src,
-            "research_sources":   rsources,
+            "company_name":        company.get("company_name", ""),
+            "category":            industry,       # ← always store the category
+            "website":             website,
+            "emails":              company.get("emails", []),
+            "phones":              company.get("phones", []),
+            "address":             company.get("address", ""),
+            "city":                company.get("city", ""),
+            "state":               company.get("state", ""),
+            "country":             company.get("country", ""),
+            "postal_code":         company.get("postal_code", ""),
+            "sources":             company.get("sources", []),
+            "updated_at":          now,
+            "email":               email,
+            "company_number":      company_number,
+            "founder_name":        founder_name,
+            "founder_number":      founder_number,
+            "source_url":          source_url,
+            "confidence":          confidence,
+            "research_source":     research_src,
+            "research_sources":    rsources,
             "_field_verification": field_verification,
+            # Google Maps geo fields
+            "place_id":            company.get("place_id"),
+            "google_maps_uri":     company.get("google_maps_uri"),
+            "primary_type":        company.get("primary_type"),
+            "latitude":            company.get("latitude"),
+            "longitude":           company.get("longitude"),
+            # People enrichment contacts (PDL → Prospeo → ContactOut)
+            "contacts":            company.get("contacts", []),
         }
         if last_verified:
             set_fields["last_verified"] = last_verified
@@ -350,45 +437,65 @@ async def generate_leads(payload: GenerateLeadsRequest):
             if website
             else {"company_name": company.get("company_name", "")}
         )
-        result = await collection.update_one(
+        result = await coll.update_one(
             filter_key,
             {"$set": set_fields, "$setOnInsert": {"created_at": now}},
             upsert=True,
         )
-        if result.upserted_id:
+
+        is_insert = bool(result.upserted_id)
+        if is_insert:
             inserted_count += 1
         else:
             updated_count += 1
-        upserted_keys.append(website or company.get("company_name", ""))
+
+        # Track new insertions so we can fetch them back for the response
+        if is_insert:
+            if website:
+                new_website_keys.append(website)
+            else:
+                new_name_keys.append(company.get("company_name", ""))
 
         _log("MONGODB", (
-            f"{'INSERT' if result.upserted_id else 'UPDATE'}: "
-            f"{company.get('company_name','?')} | "
+            f"{'INSERT' if is_insert else 'UPDATE'}: "
+            f"{company.get('company_name', '?')} | "
+            f"category={industry!r} | "
             f"email={'YES' if email else 'NO'} | "
             f"phone={'YES' if company_number else 'NO'} | "
             f"confidence={confidence}"
         ))
 
-    _log("MONGODB", f"Done — inserted={inserted_count}  updated={updated_count}")
+    _log("MONGODB", (
+        f"Done — inserted={inserted_count} updated={updated_count} "
+        f"collection='{coll_name}'"
+    ))
 
-    # ── Fetch upserted docs from MongoDB ──────────────────────────────────────
-    website_list = [k for k in upserted_keys if k.startswith("http")]
-    name_list    = [k for k in upserted_keys if not k.startswith("http")]
+    # Update lead_count in categories collection
+    try:
+        total_in_coll = await coll.count_documents({})
+        await db[CATEGORIES_COLLECTION].update_one(
+            {"name": industry},
+            {"$set": {"lead_count": total_in_coll}},
+        )
+    except Exception:
+        pass
 
-    if website_list and name_list:
-        fetch_filter: dict = {"$or": [
-            {"website":      {"$in": website_list}},
-            {"company_name": {"$in": name_list}},
-        ]}
-    elif website_list:
-        fetch_filter = {"website": {"$in": website_list}}
-    elif name_list:
-        fetch_filter = {"company_name": {"$in": name_list}}
+    # ── Stage 7: Fetch newly inserted docs from MongoDB for the response ───────
+    # IMPORTANT: we only return docs that were INSERTED this run (upserted_id set).
+    # Existing/updated docs are silently refreshed but NOT shown to the user.
+    if not new_website_keys and not new_name_keys:
+        db_docs: list[dict] = []
+        _log("RESPONSE", "No new leads inserted — returning empty list to UI")
     else:
-        fetch_filter = {}
+        conditions = []
+        if new_website_keys:
+            conditions.append({"website": {"$in": new_website_keys}})
+        if new_name_keys:
+            conditions.append({"company_name": {"$in": new_name_keys}})
 
-    cursor  = collection.find(fetch_filter).sort("updated_at", -1)
-    db_docs = await cursor.to_list(length=len(unique) + 10)
+        fetch_filter: dict = {"$or": conditions} if len(conditions) > 1 else conditions[0]
+        cursor  = coll.find(fetch_filter).sort("created_at", -1)
+        db_docs = await cursor.to_list(length=inserted_count + 10)
 
     leads_out: list[dict] = []
     for doc in db_docs:
@@ -400,50 +507,72 @@ async def generate_leads(payload: GenerateLeadsRequest):
 
     elapsed = round(time.monotonic() - t_start, 1)
 
-    # ── Final summary log ─────────────────────────────────────────────────────
-    n_email   = sum(1 for c in unique if c.get("email"))
-    n_phone   = sum(1 for c in unique if c.get("company_number"))
-    n_address = sum(1 for c in unique if c.get("address"))
-    n_founder = sum(1 for c in unique if c.get("founder_name"))
-    from app.services.enrichment_service import get_stats as _get_enrich_stats
-    wf = _get_enrich_stats()
+    # ── Summary log ───────────────────────────────────────────────────────────
+    n_email    = sum(1 for c in unique if c.get("email"))
+    n_phone    = sum(1 for c in unique if c.get("company_number"))
+    n_address  = sum(1 for c in unique if c.get("address"))
+    n_founder  = sum(1 for c in unique if c.get("founder_name"))
+    n_contacts = sum(1 for c in unique if c.get("contacts"))
+    n_contact_emails = sum(
+        sum(1 for ct in c.get("contacts", []) if ct.get("email"))
+        for c in unique
+    )
+    n_contact_phones = sum(
+        sum(1 for ct in c.get("contacts", []) if ct.get("phone"))
+        for c in unique
+    )
     _log("LEADS", (
         f"COMPLETE in {elapsed}s | "
-        f"returned={len(leads_out)} | "
+        f"pipeline_total={len(unique)} | "
+        f"new_inserted={inserted_count} | "
+        f"already_existed={updated_count} | "
+        f"returned_to_ui={len(leads_out)} | "
         f"email={n_email}/{len(unique)} | "
         f"phone={n_phone}/{len(unique)} | "
         f"address={n_address}/{len(unique)} | "
         f"founder={n_founder}/{len(unique)} | "
-        f"serper_calls={disc_stats.get('serper_calls',0)} | "
-        f"firecrawl_calls={disc_stats.get('firecrawl_calls',0)} | "
-        f"hunter_calls={wf.get('hunter_calls',0)} | "
-        f"apollo_calls={wf.get('apollo_calls',0)} | "
-        f"pdl_calls={wf.get('pdl_calls',0)} | "
-        f"google_places_calls={wf.get('google_places_calls',0)} | "
-        f"llm_calls=0 | "
-        f"404_filtered={disc_stats.get('filtered_404',0)} | "
-        f"duplicates={disc_stats.get('duplicates',0)} | "
-        f"[NO HERMES CALLED]"
+        f"contacts={n_contacts}/{len(unique)} | "
+        f"contact_emails={n_contact_emails} | "
+        f"contact_phones={n_contact_phones} | "
+        f"gmaps_discovered={ps.get('google_maps_discovered', 0)} | "
+        f"gmaps_dupes={ps.get('google_maps_duplicates', 0)} | "
+        f"ce_calls={ps.get('companyenrich_calls', 0)} | "
+        f"serper_calls={ps.get('serper_calls', 0)} | "
+        f"firecrawl_calls={ps.get('firecrawl_calls', 0)}"
     ))
 
-    # ── Build pipeline statistics for audit tooling ──────────────────────
     final_pipeline_stats = {
-        "serper_calls":        disc_stats.get("serper_calls", 0),
-        "firecrawl_calls":     disc_stats.get("firecrawl_calls", 0),
-        "hunter_calls":        wf.get("hunter_calls", 0),
-        "apollo_calls":        wf.get("apollo_calls", 0),
-        "pdl_calls":           wf.get("pdl_calls", 0),
-        "google_places_calls": wf.get("google_places_calls", 0),
-        "hunter_hits":         wf.get("hunter_hits", 0),
-        "apollo_hits":         wf.get("apollo_hits", 0),
-        "pdl_hits":            wf.get("pdl_hits", 0),
-        "google_places_hits":  wf.get("google_places_hits", 0),
-        "cache_hits":          wf.get("cache_hits", 0),
-        "llm_calls":           0,
-        "hermes_calls":        0,
-        "filtered_404":        disc_stats.get("filtered_404", 0),
-        "duplicates":          disc_stats.get("duplicates", 0),
-        "elapsed_seconds":     elapsed,
+        "google_maps_discovered":      ps.get("google_maps_discovered", 0),
+        "google_maps_duplicates":      ps.get("google_maps_duplicates", 0),
+        "companyenrich_calls":         ps.get("companyenrich_calls", 0),
+        "companyenrich_fields_filled": ps.get("companyenrich_fields_filled", 0),
+        "serper_calls":                ps.get("serper_calls", 0),
+        "serper_fields_filled":        ps.get("serper_fields_filled", 0),
+        "firecrawl_calls":             ps.get("firecrawl_calls", 0),
+        "firecrawl_fields_filled":     ps.get("firecrawl_fields_filled", 0),
+        "final_valid_companies":       ps.get("final_valid_companies", len(unique)),
+        "db_dedup_skipped":            len(dupe_companies),  # ← new: how many were dupes
+        # People enrichment orchestrator
+        "people_companies_processed":  ps.get("people_companies_processed", 0),
+        "people_contacts_found":       ps.get("people_contacts_found", 0),
+        "people_emails_found":         ps.get("people_emails_found", 0),
+        "people_phones_found":         ps.get("people_phones_found", 0),
+        "people_target_reached":       ps.get("people_target_reached", 0),
+        "people_auth_failures":        ps.get("people_auth_failures", 0),
+        "pdl_calls":                   ps.get("pdl_calls", 0),
+        "pdl_contacts":                ps.get("pdl_contacts", 0),
+        "prospeo_calls":               ps.get("prospeo_calls", 0),
+        "prospeo_contacts":            ps.get("prospeo_contacts", 0),
+        "contactout_calls":            ps.get("contactout_calls", 0),
+        "contactout_contacts":         ps.get("contactout_contacts", 0),
+        # Legacy compat
+        "pdl_companies_searched":      ps.get("pdl_companies_searched", 0),
+        "pdl_contacts_found":          ps.get("pdl_contacts_found", 0),
+        "pdl_emails_found":            ps.get("pdl_emails_found", 0),
+        "pdl_phones_found":            ps.get("pdl_phones_found", 0),
+        "pdl_api_calls":               ps.get("pdl_api_calls", 0),
+        "pdl_auth_failures":           ps.get("pdl_auth_failures", 0),
+        "elapsed_seconds":             elapsed,
     }
 
     return MongoLeadsResponse(
@@ -451,37 +580,49 @@ async def generate_leads(payload: GenerateLeadsRequest):
         inserted=inserted_count,
         updated=updated_count,
         total=len(leads_out),
-        query=discovery_result.get("query", query),
-        timestamp=discovery_result.get("timestamp", now.isoformat()),
+        query=query,
+        timestamp=datetime.now(timezone.utc).isoformat(),
         leads=leads_out,
         pipeline_stats=final_pipeline_stats,
     )
 
 
-# ── CRUD endpoints ────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /leads
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get(
     "/leads",
-    summary="List all leads from MongoDB",
+    summary="List stored leads from MongoDB",
     response_model=MongoLeadsResponse,
     tags=["Leads"],
 )
 async def get_leads(
+    category: Optional[str] = Query(
+        None,
+        description="Filter by industry category — reads from the category-specific collection",
+    ),
     search:   Optional[str] = Query(None, description="Filter by company name (case-insensitive)"),
     page:     int           = Query(1,   ge=1),
     per_page: int           = Query(100, ge=1, le=500),
 ):
-    """Fetch stored leads from MongoDB — no Hermes, no AI, no scraping."""
+    """
+    Fetch stored leads from MongoDB — no AI, no scraping.
+
+    If `category` is provided, reads from the category-specific collection
+    (e.g. leads_construction).  Otherwise reads from the legacy 'leads' collection.
+    """
     db         = get_db()
-    collection = db[COLLECTION_NAME]
+    coll_name  = collection_for_category(category) if category else COLLECTION_NAME
+    collection = db[coll_name]
 
     mongo_filter: dict = {}
     if search:
         mongo_filter["company_name"] = {"$regex": search, "$options": "i"}
 
-    total  = await collection.count_documents(mongo_filter)
-    skip   = (page - 1) * per_page
-    cursor = collection.find(mongo_filter).sort("created_at", -1).skip(skip).limit(per_page)
+    total   = await collection.count_documents(mongo_filter)
+    skip    = (page - 1) * per_page
+    cursor  = collection.find(mongo_filter).sort("created_at", -1).skip(skip).limit(per_page)
     db_docs = await cursor.to_list(length=per_page)
 
     leads_out = []
@@ -497,11 +638,15 @@ async def get_leads(
         inserted=0,
         updated=0,
         total=total,
-        query="",
+        query=category or "",
         timestamp=datetime.now(timezone.utc).isoformat(),
         leads=leads_out,
     )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Manual CRUD
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.post(
     "/leads",
@@ -514,8 +659,12 @@ def create_lead(payload: LeadCreateRequest):
     return LeadController.create_lead(payload)
 
 
-@router.get("/leads/{lead_id}", summary="Get a single lead",
-            response_model=LeadResponse, tags=["Leads"])
+@router.get(
+    "/leads/{lead_id}",
+    summary="Get a single lead",
+    response_model=LeadResponse,
+    tags=["Leads"],
+)
 def get_lead(lead_id: str):
     try:
         return LeadController.get_lead(lead_id)
@@ -523,8 +672,12 @@ def get_lead(lead_id: str):
         raise _handle_not_found(exc)
 
 
-@router.patch("/leads/{lead_id}", summary="Partially update a lead",
-              response_model=LeadResponse, tags=["Leads"])
+@router.patch(
+    "/leads/{lead_id}",
+    summary="Partially update a lead",
+    response_model=LeadResponse,
+    tags=["Leads"],
+)
 def update_lead(lead_id: str, payload: LeadUpdateRequest):
     try:
         return LeadController.update_lead(lead_id, payload)
@@ -532,8 +685,12 @@ def update_lead(lead_id: str, payload: LeadUpdateRequest):
         raise _handle_not_found(exc)
 
 
-@router.delete("/leads/{lead_id}", summary="Delete a lead",
-               response_model=MessageResponse, tags=["Leads"])
+@router.delete(
+    "/leads/{lead_id}",
+    summary="Delete a lead",
+    response_model=MessageResponse,
+    tags=["Leads"],
+)
 def delete_lead(lead_id: str):
     try:
         return LeadController.delete_lead(lead_id)
@@ -541,27 +698,115 @@ def delete_lead(lead_id: str):
         raise _handle_not_found(exc)
 
 
-# ── Debug endpoints ───────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# PATCH /leads/{lead_id}/status
+# ─────────────────────────────────────────────────────────────────────────────
 
-@router.get("/debug/database", summary="MongoDB connectivity check",
-            response_model=dict, tags=["Debug"])
-async def debug_database():
+from pydantic import BaseModel as _StatusBodyBase
+
+
+class _StatusUpdateBody(_StatusBodyBase):
+    status:   str
+    category: Optional[str] = None
+
+
+@router.patch(
+    "/leads/{lead_id}/status",
+    summary="Update CRM status for a lead",
+    response_model=dict,
+    tags=["Leads"],
+)
+async def update_lead_status(lead_id: str, payload: _StatusUpdateBody):
+    """
+    Update the CRM status field for a lead.
+    Valid values: new | contacted | follow_up | interested | not_interested | closed
+
+    The `category` param routes to the correct per-category collection.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    VALID_STATUSES = {
+        "", "new", "contacted", "follow_up",
+        "interested", "not_interested", "closed",
+    }
+    if payload.status not in VALID_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status '{payload.status}'",
+        )
+
     db         = get_db()
-    collection = db[COLLECTION_NAME]
-    count      = await collection.count_documents({})
+    coll_name  = collection_for_category(payload.category) if payload.category else COLLECTION_NAME
+    collection = db[coll_name]
+
+    try:
+        oid = ObjectId(lead_id)
+        flt = {"_id": oid}
+    except (InvalidId, Exception):
+        flt = {"id": lead_id}
+
+    result = await collection.update_one(
+        flt,
+        {"$set": {"status_update": payload.status, "updated_at": datetime.now(timezone.utc)}},
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail=f"Lead '{lead_id}' not found")
+
+    return {"success": True, "lead_id": lead_id, "status": payload.status}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Debug endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/debug/database",
+    summary="MongoDB connectivity check",
+    response_model=dict,
+    tags=["Debug"],
+)
+async def debug_database():
+    """Show connection status, database name, and per-category lead counts."""
+    db   = get_db()
+    coll = db[COLLECTION_NAME]
+
+    # Legacy leads count
+    legacy_count = await coll.count_documents({})
+
+    # Per-category counts
+    cats_coll   = db[CATEGORIES_COLLECTION]
+    cats_cursor = cats_coll.find({}, {"name": 1, "collection": 1, "_id": 0}).sort("name", 1)
+    cats_docs   = await cats_cursor.to_list(length=500)
+
+    category_counts: dict = {}
+    for cat in cats_docs:
+        cat_name  = cat.get("name", "")
+        cat_coll  = cat.get("collection") or collection_for_category(cat_name)
+        count     = await db[cat_coll].count_documents({})
+        if count > 0:
+            category_counts[cat_name] = count
+
     return {
-        "connected":      True,
-        "database":       db.name,
-        "collection":     COLLECTION_NAME,
-        "document_count": count,
+        "connected":       True,
+        "database":        db.name,
+        "legacy_collection": COLLECTION_NAME,
+        "legacy_count":    legacy_count,
+        "categories_collection": CATEGORIES_COLLECTION,
+        "category_lead_counts":  category_counts,
     }
 
 
-@router.get("/debug/sample", summary="First 5 documents from leads collection",
-            response_model=list[dict[str, Any]], tags=["Debug"])
+@router.get(
+    "/debug/sample",
+    summary="First 5 documents from leads collection",
+    response_model=list[dict[str, Any]],
+    tags=["Debug"],
+)
 async def debug_sample():
-    db         = get_db()
-    collection = db[COLLECTION_NAME]
-    cursor     = collection.find({}, {"_id": 0}).limit(5)
-    docs       = await cursor.to_list(length=5)
+    db     = get_db()
+    coll   = db[COLLECTION_NAME]
+    cursor = coll.find({}, {"_id": 0}).limit(5)
+    docs   = await cursor.to_list(length=5)
     return docs

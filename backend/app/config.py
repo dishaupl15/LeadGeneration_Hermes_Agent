@@ -23,7 +23,10 @@ class Settings(BaseSettings):
 
     # ── CORS ──────────────────────────────────────────────────────────────────
     # Comma-separated list of allowed origins (no spaces around commas)
-    CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+    CORS_ORIGINS: str = (
+        "http://localhost:5173,http://localhost:5174," 
+        "http://127.0.0.1:5173,http://127.0.0.1:5174"
+    )
 
     # ── Future integrations (placeholders) ────────────────────────────────────
     # MONGO_URI: str = ""
