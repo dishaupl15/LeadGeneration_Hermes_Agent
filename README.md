@@ -142,7 +142,7 @@ cd backend
 venv\Scripts\activate           # Windows
 # source venv/bin/activate      # macOS / Linux
 
-venv\Scripts\uvicorn app.main:app --port 8001 --reload
+venv\Scripts\uvicorn app.main:app --port 8002 --reload
 ```
 
 Backend starts at `http://localhost:8002`  

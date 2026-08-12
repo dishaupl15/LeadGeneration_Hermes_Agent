@@ -71,36 +71,30 @@ async function apiFetch(path, opts = {}) {
 /**
  * POST /leads/generate-leads
  *
- * Sends { industry, city, count }, Hermes generates leads, backend upserts
- * to MongoDB, then returns the actual MongoDB documents.
+ * Google Maps-first pipeline:
+ *   Google Maps Discovery → CompanyEnrich → Serper → Firecrawl → MongoDB
  *
- * @param {{ industry: string, city: string, count?: number }} params
+ * @param {{
+ *   industry: string,
+ *   state:    string,
+ *   district?: string | null,
+ *   target?:  number,
+ * }} params
  * @returns {Promise<{
- *   success:   boolean,
- *   inserted:  number,
- *   updated:   number,
- *   total:     number,
- *   query:     string,
- *   timestamp: string,
- *   leads:     Array<{
- *     id:           string,
- *     company_name: string,
- *     website:      string,
- *     emails:       string[],
- *     phones:       string[],
- *     address:      string,
- *     city:         string,
- *     state:        string,
- *     country:      string,
- *     created_at:   string,
- *     updated_at:   string
- *   }>
+ *   success:        boolean,
+ *   inserted:       number,
+ *   updated:        number,
+ *   total:          number,
+ *   query:          string,
+ *   timestamp:      string,
+ *   pipeline_stats: object,
+ *   leads:          Array<object>
  * }>}
  */
-export async function generateLeads({ industry, city, count = 10 }) {
+export async function generateLeads({ industry, state, district = null, target = 10 }) {
   return apiFetch('/leads/generate-leads', {
     method: 'POST',
-    body: JSON.stringify({ industry, city, count }),
+    body: JSON.stringify({ industry, state, district: district || null, target }),
   })
 }
 
@@ -122,4 +116,304 @@ export async function getLeads(params = {}) {
  */
 export async function healthCheck() {
   return apiFetch('/')
+}
+
+// ── Google Maps module ───────────────────────────────────────────────────────
+
+/**
+ * GET /maps-leads/states
+ * Returns the list of Indian states supported by the Google Maps module.
+ * @returns {Promise<{ states: string[] }>}
+ */
+export async function getMapsStates() {
+  return apiFetch('/maps-leads/states')
+}
+
+/**
+ * GET /maps-leads/districts/{state}
+ * Returns districts for a given state.
+ * @param {string} state
+ * @returns {Promise<{ state: string, districts: string[] }>}
+ */
+export async function getMapsDistricts(state) {
+  return apiFetch(`/maps-leads/districts/${encodeURIComponent(state)}`)
+}
+
+/**
+ * POST /maps-leads/generate
+ * Discover businesses from Google Maps for the given category + geography.
+ *
+ * @param {{
+ *   category:     string,
+ *   state:        string,
+ *   district?:    string | null,
+ *   target?:      number,
+ *   exclude_seen?: boolean,
+ * }} params
+ * @returns {Promise<{
+ *   success:    boolean,
+ *   category:   string,
+ *   state:      string,
+ *   district:   string | null,
+ *   target:     number,
+ *   total:      number,
+ *   message:    string,
+ *   businesses: Array<{
+ *     place_id:        string,
+ *     name:            string,
+ *     address:         string,
+ *     phone:           string | null,
+ *     website:         string | null,
+ *     google_maps_uri: string | null,
+ *     primary_type:    string | null,
+ *     latitude:        number | null,
+ *     longitude:       number | null,
+ *     source:          string,
+ *     search_query:    string,
+ *     search_area:     string,
+ *   }>,
+ *   stats: {
+ *     total_api_calls:    number,
+ *     total_raw_results:  number,
+ *     duplicates_removed: number,
+ *     with_phone:         number,
+ *     with_website:       number,
+ *     areas_searched:     number,
+ *     queries_executed:   number,
+ *     elapsed_seconds:    number,
+ *     target_reached:     boolean,
+ *     exhausted:          boolean,
+ *   }
+ * }>}
+ */
+export async function generateMapsLeads({ category, state, district, target = 50, exclude_seen = true }) {
+  return apiFetch('/maps-leads/generate', {
+    method: 'POST',
+    body: JSON.stringify({ category, state, district: district || null, target, exclude_seen }),
+  })
+}
+
+// ── Generation History ────────────────────────────────────────────────────────
+
+/**
+ * GET /history
+ * List all generation runs, newest first.
+ * @param {{ category?: string, status?: string, page?: number, per_page?: number }} params
+ */
+export async function getHistory(params = {}) {
+  const qs = new URLSearchParams(
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== ''))
+  ).toString()
+  return apiFetch(`/history${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * GET /history/legacy
+ * List legacy categories with lead counts (leads stored before history feature).
+ */
+export async function getLegacyCategories() {
+  return apiFetch('/history/legacy')
+}
+
+/**
+ * GET /history/legacy/{category}/leads
+ * Get leads for a legacy category.
+ * @param {string} category
+ * @param {{ page?: number, per_page?: number, search?: string, legacy_only?: boolean }} params
+ */
+export async function getLegacyCategoryLeads(category, params = {}) {
+  const qs = new URLSearchParams(
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== ''))
+  ).toString()
+  return apiFetch(`/history/legacy/${encodeURIComponent(category)}/leads${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * GET /history/{run_id}
+ * Get a single generation run with full details, logs, and statistics.
+ * @param {string} runId
+ */
+export async function getHistoryRun(runId) {
+  return apiFetch(`/history/${encodeURIComponent(runId)}`)
+}
+
+/**
+ * GET /history/{run_id}/leads
+ * Get leads that belong to a specific generation run.
+ * @param {string} runId
+ * @param {{ page?: number, per_page?: number, search?: string }} params
+ */
+export async function getHistoryRunLeads(runId, params = {}) {
+  const qs = new URLSearchParams(
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== ''))
+  ).toString()
+  return apiFetch(`/history/${encodeURIComponent(runId)}/leads${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * DELETE /history/{run_id}
+ * Delete a generation run record (does NOT delete the leads).
+ * @param {string} runId
+ */
+export async function deleteHistoryRun(runId) {
+  return apiFetch(`/history/${encodeURIComponent(runId)}`, { method: 'DELETE' })
+}
+
+/**
+ * GET /pdl/health
+ * Check whether PDL API key is configured on the backend.
+ * @returns {Promise<{ configured: boolean, status: string, message: string }>}
+ */
+export async function getPDLHealth() {
+  return apiFetch('/pdl/health')
+}
+
+/**
+ * POST /pdl/search-company
+ * Find business decision-maker contacts for a company via People Data Labs.
+ *
+ * @param {{
+ *   company_name: string,
+ *   domain?:      string | null,
+ *   website?:     string | null,
+ * }} params
+ * @returns {Promise<{
+ *   company_name:    string,
+ *   company_domain:  string | null,
+ *   contacts:        Array<{
+ *     name:           string | null,
+ *     designation:    string | null,
+ *     email:          string | null,
+ *     email_type:     string | null,
+ *     linkedin_url:   string | null,
+ *     company_name:   string | null,
+ *     company_domain: string | null,
+ *     source:         string,
+ *     confidence:     number,
+ *   }>,
+ *   contacts_found:  number,
+ *   emails_found:    number,
+ *   pdl_api_calls:   number,
+ *   elapsed_seconds: number,
+ *   error:           string | null,
+ * }>}
+ */
+export async function searchPDLContacts({ company_name, domain = null, website = null }) {
+  return apiFetch('/pdl/search-company', {
+    method: 'POST',
+    body: JSON.stringify({ company_name, domain: domain || null, website: website || null }),
+  })
+}
+
+// ── Form Leads (Social Lead Collection) ──────────────────────────────────────
+
+/** POST /form-leads/forms — create a new form */
+export async function createForm(payload) {
+  return apiFetch('/form-leads/forms', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+/** GET /form-leads/forms — list all forms */
+export async function listForms(params = {}) {
+  const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([,v]) => v != null && v !== ''))).toString()
+  return apiFetch(`/form-leads/forms${qs ? `?${qs}` : ''}`)
+}
+
+/** GET /form-leads/forms/{form_id} — single form with campaigns */
+export async function getFormDetail(formId) {
+  return apiFetch(`/form-leads/forms/${encodeURIComponent(formId)}`)
+}
+
+/** PUT /form-leads/forms/{form_id} — update form */
+export async function updateForm(formId, payload) {
+  return apiFetch(`/form-leads/forms/${encodeURIComponent(formId)}`, { method: 'PUT', body: JSON.stringify(payload) })
+}
+
+/** DELETE /form-leads/forms/{form_id} — soft-delete form */
+export async function deleteForm(formId) {
+  return apiFetch(`/form-leads/forms/${encodeURIComponent(formId)}`, { method: 'DELETE' })
+}
+
+/** POST /form-leads/forms/{form_id}/campaigns — create a campaign */
+export async function createCampaign(formId, payload) {
+  return apiFetch(`/form-leads/forms/${encodeURIComponent(formId)}/campaigns`, { method: 'POST', body: JSON.stringify(payload) })
+}
+
+/** GET /form-leads/forms/{form_id}/submissions — list submissions */
+export async function listSubmissions(formId, params = {}) {
+  const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([,v]) => v != null && v !== ''))).toString()
+  return apiFetch(`/form-leads/forms/${encodeURIComponent(formId)}/submissions${qs ? `?${qs}` : ''}`)
+}
+
+/** GET /public/forms/{form_id} — fetch public form (no auth) */
+export async function getPublicForm(formId) {
+  return apiFetch(`/public/forms/${encodeURIComponent(formId)}`)
+}
+
+/** POST /public/forms/{form_id}/submit — submit public form */
+export async function submitPublicForm(formId, payload) {
+  return apiFetch(`/public/forms/${encodeURIComponent(formId)}/submit`, { method: 'POST', body: JSON.stringify(payload) })
+}
+
+// ── Social Leads (Phase 2) ────────────────────────────────────────────────────
+
+/**
+ * GET /social-leads — list social leads with filters
+ */
+export async function getSocialLeads(params = {}) {
+  const qs = new URLSearchParams(
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v != null && v !== ''))
+  ).toString()
+  return apiFetch(`/social-leads${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * GET /social-leads/stats — platform/category/form/campaign counts
+ */
+export async function getSocialLeadsStats(params = {}) {
+  const qs = new URLSearchParams(
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v != null && v !== ''))
+  ).toString()
+  return apiFetch(`/social-leads/stats${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * GET /social-leads/{submission_id} — single lead detail
+ */
+export async function getSocialLead(submissionId) {
+  return apiFetch(`/social-leads/${encodeURIComponent(submissionId)}`)
+}
+
+/**
+ * GET /social-leads/history — grouped submission history for the history panel
+ * @param {{ platform?: string, category?: string, form_id?: string, campaign_id?: string }} params
+ */
+export async function getSocialLeadsHistory(params = {}) {
+  const qs = new URLSearchParams(
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v != null && v !== ''))
+  ).toString()
+  return apiFetch(`/social-leads/history${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * POST /social-leads/seed-test-data — insert 10 test submissions (dev/test)
+ * @param {{ clear_existing?: boolean }} params
+ */
+export async function seedSocialLeadsTestData(params = {}) {
+  return apiFetch('/social-leads/seed-test-data', {
+    method: 'POST',
+    body: JSON.stringify({ clear_existing: params.clear_existing ?? false }),
+  })
+}
+
+/**
+ * GET /social-leads/export — build the CSV export URL for the given filters.
+ * The caller opens/downloads the URL directly (browser handles the file).
+ * @param {{ platform?: string, category?: string, form_id?: string, campaign_id?: string, search?: string }} params
+ * @returns {string} full URL to trigger the CSV download
+ */
+export function exportSocialLeads(params = {}) {
+  const qs = new URLSearchParams(
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v != null && v !== ''))
+  ).toString()
+  return `${BASE_URL}/social-leads/export${qs ? `?${qs}` : ''}`
 }

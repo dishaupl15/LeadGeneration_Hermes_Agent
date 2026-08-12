@@ -21,7 +21,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.config import settings
 from src.config.mongo import connect_db, close_db
-from src.routes import leads_router
+from src.routes import leads_router, history_router
+from src.routes.form_leads import admin_router as form_leads_admin_router
+from src.routes.form_leads import public_router as form_leads_public_router
 from src.schemas import MessageResponse
 from google_maps.routes import router as google_maps_router
 from people_data_labs.routes import router as pdl_router
@@ -69,6 +71,17 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 # No prefix here — each route carries its full path (/leads/..., /debug/...)
 app.include_router(leads_router)
+
+# ── Generation History ────────────────────────────────────────────────────────
+app.include_router(history_router)
+
+# ── Form Leads (Social Lead Collection) ──────────────────────────────────────
+app.include_router(form_leads_admin_router)
+app.include_router(form_leads_public_router)
+
+# ── Social Leads dashboard (Phase 2) ─────────────────────────────────────────
+from src.routes.social_leads import router as social_leads_router
+app.include_router(social_leads_router)
 
 # ── Google Maps leads module (isolated — does NOT touch existing pipeline) ────
 app.include_router(google_maps_router)

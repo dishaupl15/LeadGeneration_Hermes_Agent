@@ -118,6 +118,51 @@ async def ensure_lead_indexes(
     await coll.create_index("created_at", background=True)
 
 
+async def _ensure_history_indexes(db: motor.motor_asyncio.AsyncIOMotorDatabase) -> None:
+    """Create indexes on the generation_history collection."""
+    coll = db["generation_history"]
+    await coll.create_index("run_id", unique=True, background=True)
+    await coll.create_index("started_at", background=True)
+    await coll.create_index("category", background=True)
+    await coll.create_index("status", background=True)
+    print("✅ generation_history indexes ensured")
+
+    # ── Form Leads indexes ────────────────────────────────────────────────────
+    forms_coll = db["lead_forms"]
+    await forms_coll.create_index("form_id", unique=True, background=True)
+    await forms_coll.create_index("category", background=True)
+    await forms_coll.create_index("status", background=True)
+    await forms_coll.create_index("created_at", background=True)
+
+    camps_coll = db["form_campaigns"]
+    await camps_coll.create_index("campaign_id", unique=True, background=True)
+    await camps_coll.create_index("form_id", background=True)
+    await camps_coll.create_index("platform", background=True)
+
+    subs_coll = db["form_submissions"]
+    await subs_coll.create_index("submission_id", unique=True, background=True)
+    await subs_coll.create_index("form_id", background=True)
+    await subs_coll.create_index("source", background=True)
+    await subs_coll.create_index("campaign_id", background=True)
+    await subs_coll.create_index("submitted_at", background=True)
+    print("✅ form_leads indexes ensured")
+
+    # ── Social Leads Phase 2 indexes ──────────────────────────────────────────
+    sl_coll = db["social_leads"]
+    await sl_coll.create_index("submission_id", unique=True, background=True)
+    await sl_coll.create_index("platform", background=True)
+    await sl_coll.create_index("category", background=True)
+    await sl_coll.create_index("form_id", background=True)
+    await sl_coll.create_index("campaign_id", background=True)
+    await sl_coll.create_index("submitted_at", background=True)
+    await sl_coll.create_index(
+        [("platform", 1), ("category", 1), ("form_id", 1)],
+        background=True,
+        name="platform_category_form",
+    )
+    print("✅ social_leads indexes ensured")
+
+
 async def connect_db() -> None:
     """
     Open the Motor connection.  Call this once at application startup.
@@ -136,6 +181,8 @@ async def connect_db() -> None:
         print("✅ Connected to MongoDB")
         # Seed category names into the 'categories' collection
         await _seed_categories(_db)
+        # Ensure indexes on generation_history collection
+        await _ensure_history_indexes(_db)
     except Exception as exc:
         print(f"❌ MongoDB connection failed: {exc}")
         raise

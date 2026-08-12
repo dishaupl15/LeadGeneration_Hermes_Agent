@@ -33,6 +33,7 @@ GET    /debug/sample            first 5 documents from the leads collection
 import importlib.util
 import os
 import time
+import uuid as _uuid_mod
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -48,6 +49,115 @@ from src.config.mongo import (
     ensure_lead_indexes,
 )
 from src.controllers.lead_controller import LeadController, LeadNotFoundError
+
+HISTORY_COLLECTION = "generation_history"
+
+
+def _make_run_id() -> str:
+    """Generate a short unique run ID like RUN-a3f9b2c1."""
+    return "RUN-" + _uuid_mod.uuid4().hex[:8].upper()
+
+
+async def _create_history_run(db, run_id: str, category: str, query: str,
+                               state: str, district: str, target: int,
+                               filters: dict) -> None:
+    """Insert a new generation run document with status=running."""
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "run_id": run_id,
+        "category": category,
+        "search_query": query,
+        "state": state,
+        "district": district,
+        "requested_count": target,
+        "generated_count": 0,
+        "updated_count": 0,
+        "status": "running",
+        "started_at": now,
+        "created_at": now,
+        "completed_at": None,
+        "failed_at": None,
+        "duration_seconds": None,
+        "source": "lead_generation",
+        "filters": filters,
+        "lead_ids": [],
+        "logs": [
+            {
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "level": "INFO",
+                "stage": "init",
+                "message": f"Generation run started — category={category!r} target={target}",
+            }
+        ],
+        "statistics": {},
+        "error_message": None,
+        "pipeline_stats": None,
+    }
+    try:
+        await db[HISTORY_COLLECTION].insert_one(doc)
+    except Exception as exc:
+        print(f"[HISTORY] WARNING: could not create run doc: {exc}", flush=True)
+
+
+async def _append_log(db, run_id: str, level: str, stage: str, message: str) -> None:
+    """Append one log entry to an existing run document."""
+    entry = {
+        "timestamp": datetime.now().strftime("%H:%M:%S"),
+        "level": level,
+        "stage": stage,
+        "message": message,
+    }
+    try:
+        await db[HISTORY_COLLECTION].update_one(
+            {"run_id": run_id},
+            {"$push": {"logs": entry}},
+        )
+    except Exception:
+        pass  # non-fatal
+
+
+async def _update_history_run(db, run_id: str, update: dict) -> None:
+    """Apply a $set update to the history run document."""
+    try:
+        await db[HISTORY_COLLECTION].update_one(
+            {"run_id": run_id},
+            {"$set": update},
+        )
+    except Exception as exc:
+        print(f"[HISTORY] WARNING: could not update run {run_id}: {exc}", flush=True)
+
+
+async def _complete_history_run(db, run_id: str, inserted: int, updated: int,
+                                 lead_ids: list[str], pipeline_stats: dict,
+                                 stats: dict, t_start: float, logs_extra: list) -> None:
+    """Mark a run as completed and store final statistics."""
+    now = datetime.now(timezone.utc)
+    duration = round(time.monotonic() - t_start, 1)
+    for entry in logs_extra:
+        await _append_log(db, run_id, entry["level"], entry["stage"], entry["message"])
+    await _update_history_run(db, run_id, {
+        "status": "completed",
+        "generated_count": inserted,
+        "updated_count": updated,
+        "completed_at": now.isoformat(),
+        "duration_seconds": duration,
+        "lead_ids": lead_ids,
+        "statistics": stats,
+        "pipeline_stats": pipeline_stats,
+    })
+
+
+async def _fail_history_run(db, run_id: str, error_msg: str, t_start: float) -> None:
+    """Mark a run as failed."""
+    now = datetime.now(timezone.utc)
+    duration = round(time.monotonic() - t_start, 1)
+    await _append_log(db, run_id, "ERROR", "pipeline", f"Generation failed: {error_msg}")
+    await _update_history_run(db, run_id, {
+        "status": "failed",
+        "failed_at": now.isoformat(),
+        "duration_seconds": duration,
+        "error_message": error_msg,
+    })
 from src.models.lead import Category
 from src.schemas.lead_schema import (
     ErrorResponse,
@@ -215,8 +325,23 @@ async def generate_leads(payload: GenerateLeadsRequest):
     query = f"{industry} companies in {district or state}, India"
     _log("LEADS", f"industry={industry!r} state={state!r} district={district!r} target={target}")
 
+    # ── Create generation history run ─────────────────────────────────────────
+    db_early = get_db()
+    run_id = _make_run_id()
+    await _create_history_run(
+        db_early, run_id,
+        category=industry,
+        query=query,
+        state=state,
+        district=district,
+        target=target,
+        filters={"industry": industry, "state": state, "district": district, "target": target},
+    )
+    _log("HISTORY", f"Run created: {run_id}")
+
     # ── Stage 1: Google Maps pipeline ─────────────────────────────────────────
     _log("PIPELINE", "Starting Google Maps discovery")
+    await _append_log(db_early, run_id, "SEARCH", "discovery", "Google Maps discovery started")
     from app.services.maps_pipeline_service import run_maps_pipeline, get_pipeline_stats
     try:
         maps_result = await run_maps_pipeline(
@@ -228,14 +353,19 @@ async def generate_leads(payload: GenerateLeadsRequest):
         )
     except Exception as exc:
         _log("DISCOVERY", f"Google Maps pipeline ERROR — {type(exc).__name__}: {exc}")
+        await _fail_history_run(db_early, run_id, str(exc), t_start)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
     pipeline_companies: list[dict] = maps_result.get("companies", [])
     ps = maps_result.get("pipeline_stats", {})
     _log("PIPELINE", f"Google Maps pipeline returned {len(pipeline_companies)} companies")
+    await _append_log(db_early, run_id, "SEARCH", "discovery",
+                      f"{ps.get('google_maps_discovered', len(pipeline_companies))} candidate companies discovered")
 
     if not pipeline_companies:
         _log("LEADS", "No companies found — returning empty result")
+        await _append_log(db_early, run_id, "COMPLETE", "pipeline", "No companies found — run completed with 0 results")
+        await _complete_history_run(db_early, run_id, 0, 0, [], {}, {}, t_start, [])
         return MongoLeadsResponse(
             success=True,
             inserted=0,
@@ -251,6 +381,7 @@ async def generate_leads(payload: GenerateLeadsRequest):
                 "serper_calls":           ps.get("serper_calls", 0),
                 "firecrawl_calls":        ps.get("firecrawl_calls", 0),
                 "elapsed_seconds":        round(time.monotonic() - t_start, 1),
+                "run_id":                 run_id,
             },
         )
 
@@ -272,6 +403,8 @@ async def generate_leads(payload: GenerateLeadsRequest):
         unique.append(c)
 
     _log("DEDUP", f"After route-level dedup: {len(unique)} unique companies")
+    await _append_log(db_early, run_id, "FILTER", "dedup",
+                      f"Route-level dedup: {len(unique)} unique companies after removing batch duplicates")
 
     if len(unique) > target:
         unique.sort(key=lambda c: c.get("confidence", 0.0), reverse=True)
@@ -283,6 +416,8 @@ async def generate_leads(payload: GenerateLeadsRequest):
     coll_name = collection_for_category(industry)   # e.g. "leads_construction"
     coll      = db[coll_name]
     _log("MONGODB", f"Target collection: '{coll_name}' ({len(unique)} companies to process)")
+    await _append_log(db_early, run_id, "DATABASE", "mongodb",
+                      f"Saving to collection '{coll_name}' — {len(unique)} companies to process")
 
     # Ensure indexes exist for this category collection (non-fatal)
     try:
@@ -340,6 +475,8 @@ async def generate_leads(payload: GenerateLeadsRequest):
         f"MongoDB pre-check → {len(existing_websites)} existing websites, "
         f"{len(existing_names)} existing names in '{coll_name}'"
     ))
+    await _append_log(db_early, run_id, "FILTER", "db_dedup",
+                      f"DB dedup check: {len(existing_websites)} existing websites, {len(existing_names)} existing names found")
 
     # Classify each company as NEW or DUPLICATE
     new_companies:  list[dict] = []
@@ -357,6 +494,8 @@ async def generate_leads(payload: GenerateLeadsRequest):
         f"New leads to insert: {len(new_companies)} | "
         f"Already in DB (will update silently, NOT returned to UI): {len(dupe_companies)}"
     ))
+    await _append_log(db_early, run_id, "FILTER", "classify",
+                      f"Classification complete: {len(new_companies)} new leads to insert, {len(dupe_companies)} already exist in DB")
 
     # ── Stage 6: MongoDB upsert (ALL companies — keeps data fresh) ───────────
     now            = datetime.now(timezone.utc)
@@ -366,6 +505,7 @@ async def generate_leads(payload: GenerateLeadsRequest):
     # Track keys for newly inserted docs so we can fetch them back
     new_website_keys: list[str] = []
     new_name_keys:    list[str] = []
+    inserted_doc_ids: list[str] = []  # ObjectId strings for history run
 
     # Social-media domain filter (applied to research_sources list)
     _SOCIAL_DOMS = frozenset({
@@ -439,13 +579,17 @@ async def generate_leads(payload: GenerateLeadsRequest):
         )
         result = await coll.update_one(
             filter_key,
-            {"$set": set_fields, "$setOnInsert": {"created_at": now}},
+            {
+                "$set": set_fields,
+                "$setOnInsert": {"created_at": now, "generation_run_id": run_id},
+            },
             upsert=True,
         )
 
         is_insert = bool(result.upserted_id)
         if is_insert:
             inserted_count += 1
+            inserted_doc_ids.append(str(result.upserted_id))
         else:
             updated_count += 1
 
@@ -469,6 +613,8 @@ async def generate_leads(payload: GenerateLeadsRequest):
         f"Done — inserted={inserted_count} updated={updated_count} "
         f"collection='{coll_name}'"
     ))
+    await _append_log(db_early, run_id, "DATABASE", "mongodb",
+                      f"MongoDB upsert complete — inserted={inserted_count} updated={updated_count}")
 
     # Update lead_count in categories collection
     try:
@@ -498,8 +644,11 @@ async def generate_leads(payload: GenerateLeadsRequest):
         db_docs = await cursor.to_list(length=inserted_count + 10)
 
     leads_out: list[dict] = []
+    fetched_lead_ids: list[str] = []
     for doc in db_docs:
+        raw_id = str(doc.get("_id", ""))
         doc["id"] = str(doc.pop("_id"))
+        fetched_lead_ids.append(raw_id or doc["id"])
         for ts_field in ("created_at", "updated_at"):
             if isinstance(doc.get(ts_field), datetime):
                 doc[ts_field] = doc[ts_field].isoformat()
@@ -551,7 +700,7 @@ async def generate_leads(payload: GenerateLeadsRequest):
         "firecrawl_calls":             ps.get("firecrawl_calls", 0),
         "firecrawl_fields_filled":     ps.get("firecrawl_fields_filled", 0),
         "final_valid_companies":       ps.get("final_valid_companies", len(unique)),
-        "db_dedup_skipped":            len(dupe_companies),  # ← new: how many were dupes
+        "db_dedup_skipped":            len(dupe_companies),
         # People enrichment orchestrator
         "people_companies_processed":  ps.get("people_companies_processed", 0),
         "people_contacts_found":       ps.get("people_contacts_found", 0),
@@ -573,7 +722,43 @@ async def generate_leads(payload: GenerateLeadsRequest):
         "pdl_api_calls":               ps.get("pdl_api_calls", 0),
         "pdl_auth_failures":           ps.get("pdl_auth_failures", 0),
         "elapsed_seconds":             elapsed,
+        "run_id":                      run_id,
     }
+
+    # ── Complete the history run ───────────────────────────────────────────────
+    run_statistics = {
+        "companies_discovered": ps.get("google_maps_discovered", len(pipeline_companies)),
+        "companies_processed":  len(unique),
+        "leads_generated":      inserted_count,
+        "duplicates":           len(dupe_companies),
+        "rejected":             max(0, len(pipeline_companies) - len(unique)),
+        "errors":               0,
+        "with_email":           n_email,
+        "with_phone":           n_phone,
+        "with_founder":         n_founder,
+        "contacts_found":       n_contacts,
+        "companyenrich_calls":  ps.get("companyenrich_calls", 0),
+        "serper_calls":         ps.get("serper_calls", 0),
+        "firecrawl_calls":      ps.get("firecrawl_calls", 0),
+        "elapsed_seconds":      elapsed,
+    }
+    completion_logs = [
+        {"level": "COMPLETE", "stage": "pipeline",
+         "message": f"{inserted_count} new leads generated, {updated_count} existing updated"},
+        {"level": "COMPLETE", "stage": "pipeline",
+         "message": f"Generation completed in {elapsed}s"},
+    ]
+    await _complete_history_run(
+        db_early, run_id,
+        inserted=inserted_count,
+        updated=updated_count,
+        lead_ids=inserted_doc_ids or fetched_lead_ids,
+        pipeline_stats=final_pipeline_stats,
+        stats=run_statistics,
+        t_start=t_start,
+        logs_extra=completion_logs,
+    )
+    _log("HISTORY", f"Run {run_id} completed — inserted={inserted_count}")
 
     return MongoLeadsResponse(
         success=True,
