@@ -417,3 +417,224 @@ export function exportSocialLeads(params = {}) {
   ).toString()
   return `${BASE_URL}/social-leads/export${qs ? `?${qs}` : ''}`
 }
+
+// ── Lead Status Management ────────────────────────────────────────────────────
+
+/**
+ * PATCH /leads/{lead_id}/status
+ * Update the status of a single lead (new | interested | not_interested).
+ * Pass category so the backend routes to the correct per-category collection.
+ *
+ * @param {string} leadId
+ * @param {'new'|'interested'|'not_interested'} newStatus
+ * @param {string|null} category  Industry category (e.g. "Real Estate")
+ * @returns {Promise<{ success: boolean, lead: object, status: string, status_updated_at: string }>}
+ */
+export async function updateLeadStatus(leadId, newStatus, category = null) {
+  return apiFetch(`/leads/${encodeURIComponent(leadId)}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: newStatus, category: category || undefined }),
+  })
+}
+
+/**
+ * GET /leads/status-counts
+ * Returns { new: N, interested: N, not_interested: N, total: N } from MongoDB.
+ *
+ * @param {string|null} category
+ * @returns {Promise<{ success: boolean, counts: object }>}
+ */
+export async function getLeadStatusCounts(category = null) {
+  const qs = category ? `?category=${encodeURIComponent(category)}` : ''
+  return apiFetch(`/leads/status-counts${qs}`)
+}
+
+/**
+ * POST /leads/{lead_id}/notes
+ * Append a note to an existing lead document.
+ *
+ * @param {string} leadId
+ * @param {string} text
+ * @param {string|null} category
+ * @returns {Promise<{ success: boolean, note: object, lead: object }>}
+ */
+export async function addLeadNote(leadId, text, category = null) {
+  return apiFetch(`/leads/${encodeURIComponent(leadId)}/notes`, {
+    method: 'POST',
+    body: JSON.stringify({ text, category: category || undefined }),
+  })
+}
+
+/**
+ * PATCH /leads/{lead_id}/follow-up
+ * Set or clear the follow-up date for a lead.
+ *
+ * @param {string} leadId
+ * @param {string|null} followUpDate  ISO date "YYYY-MM-DD" or null to clear
+ * @param {string|null} category
+ * @returns {Promise<{ success: boolean, follow_up_date: string|null, lead: object }>}
+ */
+export async function updateLeadFollowUp(leadId, followUpDate, category = null) {
+  return apiFetch(`/leads/${encodeURIComponent(leadId)}/follow-up`, {
+    method: 'PATCH',
+    body: JSON.stringify({ follow_up_date: followUpDate || null, category: category || undefined }),
+  })
+}
+
+/**
+ * GET /leads/follow-ups
+ * Returns today's and upcoming follow-up leads.
+ *
+ * @param {string|null} category
+ * @returns {Promise<{ today: object[], upcoming: object[], today_count: number, upcoming_count: number }>}
+ */
+export async function getFollowUps(category = null) {
+  const qs = category ? `?category=${encodeURIComponent(category)}` : ''
+  return apiFetch(`/leads/follow-ups${qs}`)
+}
+
+// ── Origami Enrichment ────────────────────────────────────────────────────────
+
+/**
+ * POST /leads/{lead_id}/enrich-origami
+ * Trigger Origami enrichment for a single lead.
+ * Falls back gracefully if ORIGAMI_API_KEY is not set.
+ *
+ * @param {string} leadId
+ * @param {string|null} category
+ * @returns {Promise<{ success: boolean, lead: object, origami: object, waterfall: object }>}
+ */
+export async function enrichLeadWithOrigami(leadId, category = null) {
+  return apiFetch(`/leads/${encodeURIComponent(leadId)}/enrich-origami`, {
+    method: 'POST',
+    body: JSON.stringify({ category: category || undefined }),
+  })
+}
+
+/**
+ * POST /leads/bulk-enrich-origami
+ * Enrich multiple leads with Origami concurrently.
+ *
+ * @param {string[]} leadIds
+ * @param {string|null} category
+ * @param {number} maxConcurrency
+ * @returns {Promise<{ success: boolean, total: number, succeeded: number, results: object[] }>}
+ */
+export async function bulkEnrichOrigami(leadIds, category = null, maxConcurrency = 3) {
+  return apiFetch('/leads/bulk-enrich-origami', {
+    method: 'POST',
+    body: JSON.stringify({
+      lead_ids: leadIds,
+      category: category || undefined,
+      max_concurrency: maxConcurrency,
+    }),
+  })
+}
+
+/**
+ * GET /leads/origami-stats
+ * Returns real Origami coverage stats calculated from actual database data.
+ * Never hardcodes percentages.
+ *
+ * @param {string|null} category
+ * @returns {Promise<{
+ *   total_leads: number,
+ *   origami_enriched: number,
+ *   founder_found: number,
+ *   founder_email_found: number,
+ *   origami_percent: number,
+ *   founder_percent: number,
+ *   founder_email_percent: number,
+ *   status_breakdown: object,
+ * }>}
+ */
+export async function getOrigamiStats(category = null) {
+  const qs = category ? `?category=${encodeURIComponent(category)}` : ''
+  return apiFetch(`/leads/origami-stats${qs}`)
+}
+
+// ── Origami Standalone Module ─────────────────────────────────────────────────
+// These call the isolated /origami/* endpoints (separate from leads pipeline).
+
+/**
+ * GET /origami/health
+ * Returns configuration status of the standalone Origami module.
+ * @returns {Promise<{ configured: boolean, status: string, message: string, base_url: string }>}
+ */
+export async function getOrigamiHealth() {
+  return apiFetch('/origami/health')
+}
+
+/**
+ * GET /origami/auth-test
+ * Live probe to verify ORIGAMI_API_KEY against the real API.
+ * @returns {Promise<{ ORIGAMI_AUTHENTICATION: string, ORIGAMI_HTTP_STATUS: number|null, message: string }>}
+ */
+export async function testOrigamiAuth() {
+  return apiFetch('/origami/auth-test')
+}
+
+/**
+ * POST /origami/search-contacts
+ * Find decision-maker contacts for a company via the standalone Origami module.
+ *
+ * @param {{
+ *   company_name: string,
+ *   domain?:      string | null,
+ *   website?:     string | null,
+ *   location?:    string | null,
+ *   category?:    string | null,
+ * }} params
+ * @returns {Promise<{
+ *   success:         boolean,
+ *   company_name:    string,
+ *   contacts:        Array<{
+ *     name:         string | null,
+ *     title:        string | null,
+ *     tier:         number,
+ *     tier_label:   string,
+ *     email:        string | null,
+ *     phone:        string | null,
+ *     linkedin_url: string | null,
+ *     confidence:   number,
+ *   }>,
+ *   contacts_found:  number,
+ *   emails_found:    number,
+ *   phones_found:    number,
+ *   founder_status:  string,
+ *   elapsed_seconds: number,
+ *   error:           string | null,
+ * }>}
+ */
+export async function origamiSearchContacts({ company_name, domain = null, website = null, location = null, category = null }) {
+  return apiFetch('/origami/search-contacts', {
+    method: 'POST',
+    body: JSON.stringify({
+      company_name,
+      domain:   domain   || undefined,
+      website:  website  || undefined,
+      location: location || undefined,
+      category: category || undefined,
+    }),
+  })
+}
+
+// ── Lead Export ───────────────────────────────────────────────────────────────
+
+/**
+ * Build the URL for CSV/Excel export with all current filters applied.
+ * The browser navigates to this URL directly so the file downloads natively.
+ *
+ * @param {'csv'|'excel'} format
+ * @param {{ category?, tab?, status?, search?, date_from?, date_to? }} params
+ * @returns {string} full URL
+ */
+export function buildExportUrl(format, params = {}) {
+  const endpoint = format === 'excel' ? '/leads/export/excel' : '/leads/export/csv'
+  const qs = new URLSearchParams(
+    Object.fromEntries(
+      Object.entries(params).filter(([, v]) => v != null && v !== '' && v !== 'all')
+    )
+  ).toString()
+  return `${BASE_URL}${endpoint}${qs ? `?${qs}` : ''}`
+}

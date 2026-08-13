@@ -1,11 +1,13 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
 import CategoryScroller from '../components/CategoryScroller'
 import RefreshLeadsButton from '../components/RefreshLeadsButton'
 import LeadsTable from '../components/LeadsTable'
 import ErrorBanner from '../components/ErrorBanner'
 import HistoryPanel from '../components/HistoryPanel'
+import FollowUpsPanel from '../components/FollowUpsPanel'
 import { useGenerateLeads } from '../hooks/useGenerateLeads'
-import { getMapsStates, getMapsDistricts } from '../services/api'
+import { getMapsStates, getMapsDistricts, getLeadStatusCounts, getLeads, buildExportUrl, bulkEnrichOrigami } from '../services/api'
+import OrigamiStatsPanel from '../components/OrigamiStatsPanel'
 
 /* ── Geography + Target selector ───────────────────────────────────────── */
 function GeoSelector({
@@ -255,6 +257,328 @@ function StatCard({ label, value, icon, color }) {
   )
 }
 
+/* ── Tab bar + search + date filters (server-driven) ────────────────────── */
+/**
+ * LeadsExplorer: a self-contained panel that owns its own query state.
+ * It fetches from GET /leads with tab + search + date_from + date_to params.
+ * Counts come from GET /leads/status-counts.
+ *
+ * Tabs: New Leads | Old Untouched | Interested | Not Interested | Follow-ups | All Leads
+ */
+function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate }) {
+  const [activeTab,  setActiveTab]  = useState('all')
+  const [search,     setSearch]     = useState('')
+  const [dateFrom,   setDateFrom]   = useState('')
+  const [dateTo,     setDateTo]     = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
+
+  // Leads query state
+  const [leads,    setLeads]    = useState([])
+  const [total,    setTotal]    = useState(0)
+  const [page,     setPage]     = useState(1)
+  const [loading,  setLoading]  = useState(false)
+  const [error,    setError]    = useState('')
+  const PER_PAGE = 50
+
+  // Tab counts
+  const [counts,        setCounts]        = useState({})
+  const [countsLoading, setCountsLoading] = useState(false)
+
+  // Debounce search input (300 ms) so we don't fire on every keystroke
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 300)
+    return () => clearTimeout(t)
+  }, [search])
+
+  // Re-fetch counts when category, refreshTrigger, or tab changes
+  useEffect(() => {
+    let cancelled = false
+    setCountsLoading(true)
+    getLeadStatusCounts(category || null)
+      .then(res => { if (!cancelled) setCounts(res.counts ?? {}) })
+      .catch(() => { if (!cancelled) setCounts({}) })
+      .finally(() => { if (!cancelled) setCountsLoading(false) })
+    return () => { cancelled = true }
+  }, [category, refreshTrigger])
+
+  // Re-fetch leads whenever any filter changes
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError('')
+    const params = {
+      ...(category  ? { category } : {}),
+      tab:       activeTab,
+      page,
+      per_page:  PER_PAGE,
+      ...(debouncedSearch ? { search: debouncedSearch } : {}),
+      ...(dateFrom        ? { date_from: dateFrom }     : {}),
+      ...(dateTo          ? { date_to:   dateTo }       : {}),
+    }
+    getLeads(params)
+      .then(res => {
+        if (!cancelled) {
+          setLeads(res.leads ?? [])
+          setTotal(res.total ?? 0)
+        }
+      })
+      .catch(err => { if (!cancelled) setError(err.message || 'Failed to load leads.') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [category, activeTab, page, debouncedSearch, dateFrom, dateTo, refreshTrigger])
+
+  // Reset to page 1 when filters change (but not page itself)
+  useEffect(() => { setPage(1) }, [category, activeTab, debouncedSearch, dateFrom, dateTo])
+
+  const TABS = [
+    { key: 'new_leads',      label: 'New Leads',      countKey: 'new',           dot: 'bg-sky-400',     active: 'bg-sky-600 text-white border-sky-600',                       inactive: 'bg-white text-sky-700 border-sky-200 hover:bg-sky-50' },
+    { key: 'old_untouched',  label: 'Old Untouched',  countKey: 'old_untouched', dot: 'bg-orange-400',  active: 'bg-orange-500 text-white border-orange-500',                 inactive: 'bg-white text-orange-700 border-orange-200 hover:bg-orange-50' },
+    { key: 'interested',     label: 'Interested',     countKey: 'interested',    dot: 'bg-emerald-400', active: 'bg-emerald-600 text-white border-emerald-600',               inactive: 'bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50' },
+    { key: 'not_interested', label: 'Not Interested', countKey: 'not_interested',dot: 'bg-rose-400',    active: 'bg-rose-600 text-white border-rose-600',                     inactive: 'bg-white text-rose-700 border-rose-200 hover:bg-rose-50' },
+    { key: 'follow_ups',     label: 'Follow-ups',     countKey: 'follow_ups',    dot: 'bg-indigo-400',  active: 'bg-indigo-600 text-white border-indigo-600',                 inactive: 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50' },
+    { key: 'all',            label: 'All Leads',      countKey: 'total',         dot: 'bg-slate-400',   active: 'bg-slate-800 text-white border-slate-800',                   inactive: 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50' },
+  ]
+
+  const totalPages = Math.max(1, Math.ceil(total / PER_PAGE))
+
+  return (
+    <div className="crm-card p-5 sm:p-6 mt-6">
+
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
+          <svg className="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+          </svg>
+          All Leads
+          {!countsLoading && (
+            <span className="text-xs font-normal text-slate-400">
+              — {counts.total ?? 0} total
+            </span>
+          )}
+        </h2>
+
+        {/* Export buttons */}
+        <div className="flex items-center gap-2">
+          <a
+            href={buildExportUrl('csv', {
+              ...(category ? { category } : {}),
+              ...(activeTab !== 'all' ? { tab: activeTab } : {}),
+              ...(debouncedSearch ? { search: debouncedSearch } : {}),
+              ...(dateFrom ? { date_from: dateFrom } : {}),
+              ...(dateTo   ? { date_to:   dateTo }   : {}),
+            })}
+            download
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold
+                       bg-emerald-50 text-emerald-700 border border-emerald-200
+                       hover:bg-emerald-100 hover:border-emerald-300 transition-colors
+                       focus:outline-none focus:ring-2 focus:ring-emerald-400"
+            title="Download filtered leads as CSV"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>
+            CSV
+          </a>
+          <a
+            href={buildExportUrl('excel', {
+              ...(category ? { category } : {}),
+              ...(activeTab !== 'all' ? { tab: activeTab } : {}),
+              ...(debouncedSearch ? { search: debouncedSearch } : {}),
+              ...(dateFrom ? { date_from: dateFrom } : {}),
+              ...(dateTo   ? { date_to:   dateTo }   : {}),
+            })}
+            download
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold
+                       bg-indigo-50 text-indigo-700 border border-indigo-200
+                       hover:bg-indigo-100 hover:border-indigo-300 transition-colors
+                       focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            title="Download filtered leads as Excel"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>
+            Excel
+          </a>
+        </div>
+      </div>
+
+      {/* ── Tab bar ── */}
+      <div className="flex flex-wrap gap-2 mb-4">
+        {TABS.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold
+                        border transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-indigo-400
+                        ${activeTab === tab.key ? tab.active : tab.inactive}`}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+              activeTab === tab.key ? 'bg-white/80' : tab.dot
+            }`}/>
+            {tab.label}
+            <span className={`inline-flex items-center justify-center min-w-[18px] h-4 px-1 rounded-full
+                              text-[10px] font-bold
+                              ${activeTab === tab.key ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'}
+                              ${countsLoading ? 'opacity-40' : ''}`}>
+              {countsLoading ? '…' : (counts[tab.countKey] ?? 0)}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {/* ── Search + Date filters ── */}
+      <div className="flex flex-wrap gap-3 mb-4">
+
+        {/* Search */}
+        <div className="relative flex-1 min-w-[220px]">
+          <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+            <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+            </svg>
+          </div>
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search name, email, phone, company…"
+            className="crm-input pl-9 pr-8 text-sm w-full"
+          />
+          {search && (
+            <button
+              onClick={() => setSearch('')}
+              className="absolute inset-y-0 right-0 flex items-center pr-2.5
+                         text-slate-400 hover:text-slate-600"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </button>
+          )}
+        </div>
+
+        {/* Date From */}
+        <div className="flex flex-col gap-0.5 min-w-[130px]">
+          <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider pl-0.5">
+            From
+          </label>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={e => setDateFrom(e.target.value)}
+            className="crm-input text-sm"
+          />
+        </div>
+
+        {/* Date To */}
+        <div className="flex flex-col gap-0.5 min-w-[130px]">
+          <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider pl-0.5">
+            To
+          </label>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={e => setDateTo(e.target.value)}
+            className="crm-input text-sm"
+          />
+        </div>
+
+        {/* Clear filters */}
+        {(search || dateFrom || dateTo) && (
+          <button
+            onClick={() => { setSearch(''); setDateFrom(''); setDateTo('') }}
+            className="self-end mb-0.5 inline-flex items-center gap-1 px-3 py-2 rounded-lg
+                       text-xs font-semibold text-slate-500 bg-slate-100 hover:bg-slate-200
+                       transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+            Clear
+          </button>
+        )}
+      </div>
+
+      {/* ── Error ── */}
+      {error && (
+        <p className="text-sm text-rose-600 mb-3">{error}</p>
+      )}
+
+      {/* ── Table ── */}
+      <LeadsTable
+        leads={leads}
+        isLoading={loading}
+        searchQuery={debouncedSearch}
+        onStatusUpdate={(leadId, newStatus, updatedDoc) => {
+          // Update in local list immediately
+          setLeads(prev => prev.map(l => {
+            const id = l.id ?? l._id
+            return id === leadId
+              ? (updatedDoc ? { ...l, ...updatedDoc, id: leadId } : { ...l, status: newStatus })
+              : l
+          }))
+          // Refresh counts
+          if (onStatusUpdate) onStatusUpdate(leadId, newStatus, updatedDoc)
+        }}
+        onLeadUpdate={(updatedDoc) => {
+          if (!updatedDoc) return
+          const uid = updatedDoc.id ?? updatedDoc._id
+          setLeads(prev => prev.map(l => (l.id ?? l._id) === uid ? { ...l, ...updatedDoc } : l))
+          if (onLeadUpdate) onLeadUpdate(updatedDoc)
+        }}
+      />
+
+      {/* ── Pagination ── */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between mt-4 pt-3 border-t border-slate-100">
+          <span className="text-xs text-slate-500">
+            Page <strong>{page}</strong> of <strong>{totalPages}</strong>
+            {' '}·{' '}<strong>{total}</strong> lead{total !== 1 ? 's' : ''}
+          </span>
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+              disabled={page === 1}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200
+                         bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-40
+                         disabled:cursor-not-allowed transition-colors"
+            >
+              ← Prev
+            </button>
+            <button
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+              disabled={page === totalPages}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200
+                         bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-40
+                         disabled:cursor-not-allowed transition-colors"
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Footer count ── */}
+      {!loading && leads.length > 0 && totalPages === 1 && (
+        <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between">
+          <span className="text-xs text-slate-400">
+            Showing <strong className="text-slate-600">{leads.length}</strong> of{' '}
+            <strong className="text-slate-600">{total}</strong> leads
+          </span>
+          <span className="text-xs text-slate-400 flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"/>
+            MongoDB · Live
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    MAIN PAGE
    ══════════════════════════════════════════════════════════════════════════ */
@@ -264,13 +588,21 @@ export default function LeadGeneration() {
   const [selectedState,    setSelectedState]    = useState('')
   const [selectedDistrict, setSelectedDistrict] = useState('')
   const [target,           setTarget]           = useState(10)
-  const [searchQuery,      setSearchQuery]      = useState('')
   const [sortDir,          setSortDir]          = useState(null)
   const [showHistory,      setShowHistory]      = useState(false)
+  const [showFollowUps,    setShowFollowUps]    = useState(false)
 
-  // History-override: when user clicks "Load into table" in the history panel,
-  // we store those leads here so they're displayed WITHOUT triggering a new API call.
-  const [historyLeads, setHistoryLeads] = useState(null)   // null = not active
+  // Bumped after status/note/follow-up changes to re-fetch counts & explorer
+  const [refreshTick, setRefreshTick] = useState(0)
+
+  // Origami bulk enrichment state
+  const [bulkOrigamiRunning, setBulkOrigamiRunning] = useState(false)
+  const [bulkOrigamiResult,  setBulkOrigamiResult]  = useState(null)  // null | { succeeded, failed, founders_found, origami_enriched }
+  const [bulkOrigamiError,   setBulkOrigamiError]   = useState('')
+  const [origamiStatsTick,   setOrigamiStatsTick]   = useState(0)     // bump to refresh OrigamiStatsPanel
+
+  // History-override: when user clicks "Load into table" in the history panel
+  const [historyLeads, setHistoryLeads] = useState(null)
   const [historyLabel, setHistoryLabel] = useState('')
 
   // ── Lead generation hook ─────────────────────────────────────────────────
@@ -279,63 +611,97 @@ export default function LeadGeneration() {
     generate, refreshFromDB, clear,
   } = useGenerateLeads()
 
-  // Which leads to actually render — history override wins until a fresh
-  // generate or clear resets it.
+  // Which leads to show in the "Generated Results" panel
   const activeLeads = historyLeads !== null ? historyLeads : leads
 
-  // ── Filtered + sorted active leads ───────────────────────────────────────
-  const filteredLeads = useMemo(() => {
-    let result = activeLeads
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase()
-      result = result.filter((l) => (l.company_name ?? '').toLowerCase().includes(q))
+  // ── Callbacks from LeadsExplorer / generated table ───────────────────────
+  const handleStatusUpdate = useCallback((leadId, newStatus, updatedLeadDoc) => {
+    if (historyLeads !== null) {
+      setHistoryLeads(prev =>
+        (prev ?? []).map(l => {
+          const id = l.id ?? l._id ?? l.company_name
+          if (id === leadId)
+            return updatedLeadDoc ? { ...l, ...updatedLeadDoc, id: leadId } : { ...l, status: newStatus }
+          return l
+        })
+      )
     }
-    if (sortDir) {
-      result = [...result].sort((a, b) => {
-        const an = (a.company_name ?? '').toLowerCase()
-        const bn = (b.company_name ?? '').toLowerCase()
-        return sortDir === 'asc' ? an.localeCompare(bn) : bn.localeCompare(an)
-      })
-    }
-    return result
-  }, [activeLeads, searchQuery, sortDir])
+    setRefreshTick(t => t + 1)
+  }, [historyLeads])
 
-  // ── Handlers ─────────────────────────────────────────────────────────────
+  const handleLeadUpdate = useCallback((updatedDoc) => {
+    if (!updatedDoc) return
+    const uid = updatedDoc.id ?? updatedDoc._id
+    if (historyLeads !== null) {
+      setHistoryLeads(prev =>
+        (prev ?? []).map(l => (l.id ?? l._id) === uid ? { ...l, ...updatedDoc } : l)
+      )
+    }
+  }, [historyLeads])
+
+  // ── Bulk Origami enrichment for the currently-shown generated list ────────
+  const handleBulkOrigami = useCallback(async () => {
+    const targets = activeLeads.filter(l => l.id || l._id)
+    if (targets.length === 0) return
+    setBulkOrigamiRunning(true)
+    setBulkOrigamiResult(null)
+    setBulkOrigamiError('')
+    try {
+      const ids = targets.map(l => l.id ?? l._id).filter(Boolean)
+      // Batch max 100 per request; take the first 100 if more
+      const batchIds = ids.slice(0, 100)
+      const res = await bulkEnrichOrigami(batchIds, selectedCategory, 3)
+      setBulkOrigamiResult(res)
+      setOrigamiStatsTick(t => t + 1)   // refresh the coverage stats panel
+      setRefreshTick(t => t + 1)         // refresh the leads explorer counts
+    } catch (err) {
+      setBulkOrigamiError(err.message || 'Bulk enrichment failed.')
+    } finally {
+      setBulkOrigamiRunning(false)
+    }
+  }, [activeLeads, selectedCategory])
+
+  // ── Sorted generated leads (client-side sort only — no filter) ───────────
+  const sortedLeads = useMemo(() => {
+    if (!sortDir) return activeLeads
+    return [...activeLeads].sort((a, b) => {
+      const an = (a.company_name ?? '').toLowerCase()
+      const bn = (b.company_name ?? '').toLowerCase()
+      return sortDir === 'asc' ? an.localeCompare(bn) : bn.localeCompare(an)
+    })
+  }, [activeLeads, sortDir])
+
   const handleGenerate = () => {
     if (!selectedCategory || !selectedState) return
-    // Clear any history override so fresh results are shown
     setHistoryLeads(null)
     setHistoryLabel('')
-    setSearchQuery('')
     setSortDir(null)
     generate({ industry: selectedCategory, state: selectedState, district: selectedDistrict || null, target })
   }
 
   const handleCategorySelect = (cat) => {
     setSelectedCategory(cat)
-    // Clear table if it had previous results
     if (activeLeads.length > 0) {
       clear()
       setHistoryLeads(null)
       setHistoryLabel('')
     }
-    setSearchQuery('')
     setSortDir(null)
+    setRefreshTick(t => t + 1)
   }
 
   const handleSortToggle = () =>
     setSortDir((prev) => (prev === 'asc' ? 'desc' : prev === 'desc' ? null : 'asc'))
 
-  // Called from HistoryPanel — load stored leads into the main table
   const handleLoadFromHistory = (storedLeads, categoryName, runId) => {
     setHistoryLeads(storedLeads)
     setHistoryLabel(runId ? `${categoryName} · ${runId}` : categoryName)
-    setSearchQuery('')
     setSortDir(null)
     setShowHistory(false)
+    setRefreshTick(t => t + 1)
   }
 
-  // ── Derived counts (always from activeLeads) ─────────────────────────────
+  // ── Derived counts (from activeLeads — generated results panel) ──────────
   const totalLeads  = activeLeads.length
   const withEmail   = activeLeads.filter((l) => l.email).length
   const withPhone   = activeLeads.filter((l) => l.company_number || l.phones?.length > 0).length
@@ -406,6 +772,26 @@ export default function LeadGeneration() {
                 <span className="hidden sm:inline">Lead Forms</span>
               </a>
 
+              {/* ── Origami Enrichment button ── */}
+              <a
+                href="/origami"
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl
+                           border border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700
+                           hover:bg-fuchsia-100 hover:border-fuchsia-300
+                           text-xs font-semibold shadow-sm transition-all duration-150
+                           focus:outline-none focus:ring-2 focus:ring-fuchsia-400"
+                title="Origami people enrichment — find founders & decision-makers"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3
+                       m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547
+                       A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531
+                       c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+                </svg>
+                <span className="hidden sm:inline">Origami</span>
+              </a>
+
               {/* ── History button ── */}
               <button
                 onClick={() => setShowHistory(true)}
@@ -423,7 +809,23 @@ export default function LeadGeneration() {
                 <span className="hidden sm:inline">History</span>
               </button>
 
-              {/* Refresh from DB */}
+              {/* ── Follow-ups button ── */}
+              <button
+                onClick={() => setShowFollowUps(true)}
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl
+                           border border-rose-200 bg-rose-50 text-rose-700
+                           hover:bg-rose-100 hover:border-rose-300
+                           text-xs font-semibold shadow-sm transition-all duration-150
+                           focus:outline-none focus:ring-2 focus:ring-rose-400"
+                title="View scheduled follow-ups"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                </svg>
+                <span className="hidden sm:inline">Follow-ups</span>
+              </button>
+
               <RefreshLeadsButton
                 isRefreshing={isRefreshing}
                 isLoading={isLoading}
@@ -464,7 +866,7 @@ export default function LeadGeneration() {
         {/* Error banner */}
         {error && <ErrorBanner message={error} onDismiss={() => { clear(); setHistoryLeads(null) }} />}
 
-        {/* History-source banner — shown when table is loaded from history */}
+        {/* History-source banner */}
         {historyLeads !== null && (
           <div className="mb-5 flex items-center justify-between gap-3 px-4 py-3
                           rounded-xl bg-amber-50 border border-amber-200">
@@ -527,85 +929,133 @@ export default function LeadGeneration() {
           <PipelineStatsBar stats={pipelineStats} />
         )}
 
-        {/* Results card */}
-        <div className="crm-card p-5 sm:p-6">
+        {/* ── Generated Results card (fresh pipeline or history) ──────── */}
+        {totalLeads > 0 && (
+          <div className="crm-card p-5 sm:p-6">
 
-          {/* Header row */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
-            <div>
-              <h2 className="text-base font-bold text-slate-800">
-                {historyLeads !== null ? `History — ${historyLabel}` : 'Generated Leads'}
-              </h2>
-              <p className="text-xs text-slate-400 mt-0.5">
-                {isLoading
-                  ? 'Discovering and enriching companies…'
-                  : totalLeads === 0
-                    ? 'No results yet — select a category and state, then click Generate Leads.'
-                    : `${filteredLeads.length} of ${totalLeads} compan${totalLeads !== 1 ? 'ies' : 'y'}`
+            {/* Header row */}
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
+              <div>
+                <h2 className="text-base font-bold text-slate-800">
+                  {historyLeads !== null ? `History — ${historyLabel}` : 'Generated Leads'}
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {isLoading
+                    ? 'Discovering and enriching companies…'
+                    : `${totalLeads} compan${totalLeads !== 1 ? 'ies' : 'y'}`
                       + (historyLeads !== null
                           ? ' · from MongoDB history'
                           : selectedState
                             ? ` · ${selectedDistrict ? selectedDistrict + ', ' : ''}${selectedState}`
                             : '')
-                }
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2">
-              {/* Sort toggle */}
-              {totalLeads > 0 && (
-                <button
-                  onClick={handleSortToggle}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg
-                             bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-medium
-                             transition-colors"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12"/>
-                  </svg>
-                  {sortDir === 'asc' ? 'A → Z' : sortDir === 'desc' ? 'Z → A' : 'Sort'}
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Search */}
-          {totalLeads > 0 && (
-            <div className="relative mb-4">
-              <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5">
-                <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-                </svg>
+                  }
+                </p>
               </div>
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search by company name…"
-                className="crm-input pl-10 pr-10"
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => setSearchQuery('')}
-                  className="absolute inset-y-0 right-0 flex items-center pr-3
-                             text-slate-400 hover:text-slate-600 transition-colors"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M6 18L18 6M6 6l12 12"/>
-                  </svg>
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {/* Bulk Origami Enrichment button — runs on all leads in this panel */}
+                {totalLeads > 0 && !isLoading && (
+                  <button
+                    onClick={handleBulkOrigami}
+                    disabled={bulkOrigamiRunning}
+                    title={`Run Origami enrichment on all ${Math.min(totalLeads, 100)} leads to find founders and decision-makers`}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold
+                               bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-60
+                               transition-colors focus:outline-none focus:ring-2 focus:ring-violet-400"
+                  >
+                    {bulkOrigamiRunning
+                      ? <>
+                          <svg className="w-3.5 h-3.5 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+                          </svg>
+                          Enriching…
+                        </>
+                      : <>
+                          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                              d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+                          </svg>
+                          Bulk Enrich
+                        </>
+                    }
+                  </button>
+                )}
+                {totalLeads > 0 && (
+                  <button
+                    onClick={handleSortToggle}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg
+                               bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-medium
+                               transition-colors"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12"/>
+                    </svg>
+                    {sortDir === 'asc' ? 'A → Z' : sortDir === 'desc' ? 'Z → A' : 'Sort'}
+                  </button>
+                )}
+              </div>
             </div>
-          )}
 
-          {/* Table */}
-          <LeadsTable
-            leads={filteredLeads}
-            isLoading={isLoading}
-            searchQuery={searchQuery}
+            {/* Bulk Origami result banner */}
+            {bulkOrigamiError && (
+              <div className="mb-4 flex items-center gap-2 px-4 py-2.5 rounded-xl
+                              bg-rose-50 border border-rose-200 text-xs text-rose-700">
+                <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                </svg>
+                Bulk enrichment error: {bulkOrigamiError}
+                <button onClick={() => setBulkOrigamiError('')} className="ml-auto text-rose-500 hover:text-rose-700">✕</button>
+              </div>
+            )}
+            {bulkOrigamiResult && !bulkOrigamiError && (
+              <div className="mb-4 flex flex-wrap items-center gap-x-5 gap-y-1.5 px-4 py-2.5 rounded-xl
+                              bg-violet-50 border border-violet-200 text-xs text-violet-700">
+                <span className="flex items-center gap-1.5 font-semibold">
+                  <span className="w-1.5 h-1.5 rounded-full bg-violet-500 flex-shrink-0"/>
+                  Origami enrichment complete
+                </span>
+                <span>✅ Succeeded: <strong>{bulkOrigamiResult.succeeded ?? 0}</strong></span>
+                {(bulkOrigamiResult.failed ?? 0) > 0 && (
+                  <span>❌ Failed: <strong>{bulkOrigamiResult.failed}</strong></span>
+                )}
+                <span>🔍 Founders found: <strong>{bulkOrigamiResult.founders_found ?? 0}</strong></span>
+                <span>⚡ Origami enriched: <strong>{bulkOrigamiResult.origami_enriched ?? 0}</strong></span>
+                {bulkOrigamiResult.elapsed_seconds != null && (
+                  <span>⏱ <strong>{bulkOrigamiResult.elapsed_seconds}s</strong></span>
+                )}
+                <button
+                  onClick={() => setBulkOrigamiResult(null)}
+                  className="ml-auto text-violet-500 hover:text-violet-700"
+                >✕</button>
+              </div>
+            )}
+
+            <LeadsTable
+              leads={sortedLeads}
+              isLoading={isLoading}
+              sortDir={sortDir}
+              onSortChange={handleSortToggle}
+              onStatusUpdate={handleStatusUpdate}
+              onLeadUpdate={handleLeadUpdate}
+            />
+          </div>
+        )}
+
+        {/* ── All Leads Explorer (server-driven: tabs + search + date) ── */}
+        <LeadsExplorer
+          category={selectedCategory}
+          refreshTrigger={refreshTick}
+          onStatusUpdate={handleStatusUpdate}
+          onLeadUpdate={handleLeadUpdate}
+        />
+
+        {/* ── Origami Coverage Stats (live from DB — never hardcoded) ── */}
+        <div className="mt-6">
+          <OrigamiStatsPanel
+            category={selectedCategory}
+            refreshTrigger={origamiStatsTick}
           />
         </div>
       </main>
@@ -615,6 +1065,14 @@ export default function LeadGeneration() {
         <HistoryPanel
           onClose={() => setShowHistory(false)}
           onLoadLeads={handleLoadFromHistory}
+        />
+      )}
+
+      {/* ── FOLLOW-UPS PANEL (modal) ───────────────────────────────────────── */}
+      {showFollowUps && (
+        <FollowUpsPanel
+          category={selectedCategory}
+          onClose={() => setShowFollowUps(false)}
         />
       )}
     </div>

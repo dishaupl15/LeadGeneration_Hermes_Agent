@@ -29,6 +29,7 @@ from google_maps.routes import router as google_maps_router
 from people_data_labs.routes import router as pdl_router
 from prospeo.routes import router as prospeo_router
 from contactout.routes import router as contactout_router
+from origami.routes import router as origami_router
 
 
 # ── Lifespan: connect DB on startup, close on shutdown ───────────────────────
@@ -94,6 +95,10 @@ app.include_router(prospeo_router)
 
 # ── ContactOut people enrichment (standalone — does NOT touch existing pipeline) ─
 app.include_router(contactout_router)
+
+# ── Origami people enrichment (standalone — does NOT touch existing pipeline) ──
+# To remove: delete this line + the import above + the origami/ folder
+app.include_router(origami_router)
 
 
 # ── Health endpoints ──────────────────────────────────────────────────────────

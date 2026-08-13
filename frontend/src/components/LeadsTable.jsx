@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import EmptyState from './EmptyState'
 import PDLContactsPanel from './PDLContactsPanel'
+import LeadDetailPanel from './LeadDetailPanel'
 import { usePDLSearch } from '../hooks/usePDLSearch'
+import { updateLeadStatus } from '../services/api'
 
 /* ════════════════════════════════════════════════════════════════════
    HELPERS
@@ -175,47 +177,129 @@ function ConfidenceBar({ value }) {
   )
 }
 
-/** Status dropdown — CRM update status per company */
-const STATUS_OPTIONS = [
-  { value: '',              label: 'Set status…',      bg: 'bg-slate-100',    text: 'text-slate-400',   dot: 'bg-slate-300'   },
-  { value: 'new',           label: 'New Data',         bg: 'bg-sky-50',       text: 'text-sky-700',     dot: 'bg-sky-400'     },
-  { value: 'contacted',     label: 'Contacted',        bg: 'bg-violet-50',    text: 'text-violet-700',  dot: 'bg-violet-400'  },
-  { value: 'follow_up',     label: 'Follow-up',        bg: 'bg-amber-50',     text: 'text-amber-700',   dot: 'bg-amber-400'   },
-  { value: 'interested',    label: 'Interested',       bg: 'bg-emerald-50',   text: 'text-emerald-700', dot: 'bg-emerald-400' },
-  { value: 'not_interested',label: 'Not Interested',   bg: 'bg-rose-50',      text: 'text-rose-700',    dot: 'bg-rose-400'    },
-  { value: 'closed',        label: 'Closed',           bg: 'bg-slate-100',    text: 'text-slate-600',   dot: 'bg-slate-400'   },
-]
+/** Status badge — shows current status with colour coding */
+function StatusBadge({ status }) {
+  if (!status || status === 'new') {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full
+                       bg-sky-50 border border-sky-200 text-sky-700 text-[11px] font-semibold">
+        <span className="w-1.5 h-1.5 rounded-full bg-sky-400 flex-shrink-0" />
+        New
+      </span>
+    )
+  }
+  if (status === 'interested') {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full
+                       bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-semibold">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
+        Interested
+      </span>
+    )
+  }
+  if (status === 'not_interested') {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full
+                       bg-rose-50 border border-rose-200 text-rose-700 text-[11px] font-semibold">
+        <span className="w-1.5 h-1.5 rounded-full bg-rose-400 flex-shrink-0" />
+        Not Interested
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full
+                     bg-slate-100 border border-slate-200 text-slate-500 text-[11px] font-semibold">
+      <span className="w-1.5 h-1.5 rounded-full bg-slate-300 flex-shrink-0" />
+      {status}
+    </span>
+  )
+}
 
-function StatusDropdown({ leadId, value, onChange }) {
-  const selected = STATUS_OPTIONS.find(o => o.value === (value || '')) || STATUS_OPTIONS[0]
+/**
+ * StatusButtons — [Interested] [Not Interested] action buttons for a lead row.
+ * Calls the API, updates the UI optimistically, then confirms from server response.
+ */
+function StatusButtons({ lead, currentStatus, onStatusUpdate }) {
+  const [saving, setSaving] = useState(null) // 'interested' | 'not_interested' | null
+
+  const handleClick = async (newStatus) => {
+    if (saving) return
+    setSaving(newStatus)
+    try {
+      const res = await updateLeadStatus(
+        lead.id ?? lead._id ?? lead.company_name,
+        newStatus,
+        lead.category ?? null,
+      )
+      // Use server-confirmed status from response
+      const confirmedStatus = res.status ?? newStatus
+      onStatusUpdate(lead.id ?? lead._id ?? lead.company_name, confirmedStatus, res.lead ?? null)
+    } catch (err) {
+      console.error('[StatusButtons] update failed:', err.message)
+      // Revert optimistic update on failure (parent still has old value)
+    } finally {
+      setSaving(null)
+    }
+  }
+
+  const isInterested    = currentStatus === 'interested'
+  const isNotInterested = currentStatus === 'not_interested'
 
   return (
-    <div className="relative min-w-[148px]">
-      {/* Colored chip display */}
-      <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border
-                       ${value ? `${selected.bg} border-current/20` : 'bg-white border-slate-200'}
-                       text-xs font-semibold ${selected.text} pointer-events-none
-                       absolute inset-0 z-0`}>
-        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${selected.dot}`} />
-        <span className="truncate">{selected.label}</span>
-        <svg className="w-3 h-3 ml-auto flex-shrink-0 opacity-60" fill="none"
-          stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 9l-7 7-7-7"/>
-        </svg>
-      </div>
+    <div className="flex flex-col gap-1.5 min-w-[130px]">
+      {/* Current badge */}
+      <StatusBadge status={currentStatus} />
 
-      {/* Invisible native select on top for interaction */}
-      <select
-        value={value || ''}
-        onChange={(e) => onChange(leadId, e.target.value)}
-        className="relative z-10 w-full h-full opacity-0 cursor-pointer
-                   text-xs py-1.5 px-2.5 rounded-lg"
-        title="Set company status"
-      >
-        {STATUS_OPTIONS.map(o => (
-          <option key={o.value} value={o.value}>{o.label}</option>
-        ))}
-      </select>
+      {/* Action buttons */}
+      <div className="flex gap-1">
+        <button
+          onClick={() => handleClick('interested')}
+          disabled={saving !== null || isInterested}
+          title={isInterested ? 'Already marked Interested' : 'Mark as Interested'}
+          className={`flex-1 inline-flex items-center justify-center gap-1 px-2 py-1
+                      rounded-lg text-[11px] font-semibold border transition-all
+                      focus:outline-none focus:ring-2 focus:ring-emerald-400
+                      ${isInterested
+                        ? 'bg-emerald-100 border-emerald-300 text-emerald-600 opacity-60 cursor-default'
+                        : 'bg-white border-emerald-300 text-emerald-700 hover:bg-emerald-50 hover:border-emerald-400'
+                      } disabled:cursor-not-allowed`}
+        >
+          {saving === 'interested'
+            ? <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+              </svg>
+            : <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/>
+              </svg>
+          }
+          {isInterested ? '✓' : 'Interested'}
+        </button>
+
+        <button
+          onClick={() => handleClick('not_interested')}
+          disabled={saving !== null || isNotInterested}
+          title={isNotInterested ? 'Already marked Not Interested' : 'Mark as Not Interested'}
+          className={`flex-1 inline-flex items-center justify-center gap-1 px-2 py-1
+                      rounded-lg text-[11px] font-semibold border transition-all
+                      focus:outline-none focus:ring-2 focus:ring-rose-400
+                      ${isNotInterested
+                        ? 'bg-rose-100 border-rose-300 text-rose-600 opacity-60 cursor-default'
+                        : 'bg-white border-rose-300 text-rose-700 hover:bg-rose-50 hover:border-rose-400'
+                      } disabled:cursor-not-allowed`}
+        >
+          {saving === 'not_interested'
+            ? <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+              </svg>
+            : <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+          }
+          {isNotInterested ? '✓' : 'No'}
+        </button>
+      </div>
     </div>
   )
 }
@@ -274,7 +358,7 @@ function SkeletonRow({ index }) {
     10.  website         (clickable link, shown last)
     11.  contacts        (PDL "Find Contacts" button)
    ════════════════════════════════════════════════════════════════════ */
-function LeadRow({ lead, index, onFindContacts, status, onStatusChange }) {
+function LeadRow({ lead, index, onFindContacts, onOpenDetail, status, onStatusUpdate }) {
   // ── Resolve all fields with fallbacks ──────────────────────────
   const email         = resolveEmail(lead)
   const phone         = resolvePhone(lead)
@@ -401,12 +485,12 @@ function LeadRow({ lead, index, onFindContacts, status, onStatusChange }) {
         ) : <Nil />}
       </td>
 
-      {/* 9. Status */}
-      <td className="px-4 py-3 min-w-[155px]">
-        <StatusDropdown
-          leadId={lead.id ?? lead.company_name}
-          value={status}
-          onChange={onStatusChange}
+      {/* 9. Status — [Interested] [Not Interested] buttons */}
+      <td className="px-4 py-3 min-w-[140px]">
+        <StatusButtons
+          lead={lead}
+          currentStatus={status}
+          onStatusUpdate={onStatusUpdate}
         />
       </td>
 
@@ -425,7 +509,6 @@ function LeadRow({ lead, index, onFindContacts, status, onStatusChange }) {
       {/* 11. Find Contacts (PDL) */}
       <td className="px-4 py-3.5 whitespace-nowrap">
         {(lead.contacts?.length > 0) ? (
-          /* Show inline count badge — click to expand in the contacts drawer */
           <button
             onClick={() => onFindContacts(lead)}
             title="View enriched contacts"
@@ -468,6 +551,39 @@ function LeadRow({ lead, index, onFindContacts, status, onStatusChange }) {
           </button>
         )}
       </td>
+
+      {/* 12. Details — opens LeadDetailPanel (notes + follow-up) */}
+      <td className="px-4 py-3.5 whitespace-nowrap">
+        <button
+          onClick={() => onOpenDetail(lead)}
+          title="Notes & Follow-up"
+          className="
+            inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold
+            bg-amber-50 text-amber-700 border border-amber-200
+            hover:bg-amber-100 hover:border-amber-300
+            active:bg-amber-200 transition-colors duration-150
+            focus:outline-none focus:ring-2 focus:ring-amber-400 focus:ring-offset-1
+          "
+        >
+          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+          </svg>
+          {(lead.notes?.length > 0 || lead.follow_up_date)
+            ? <span className="flex items-center gap-1">
+                Details
+                {lead.notes?.length > 0 && (
+                  <span className="inline-flex items-center justify-center w-4 h-4 rounded-full
+                                   bg-amber-200 text-amber-800 text-[9px] font-bold">
+                    {lead.notes.length}
+                  </span>
+                )}
+                {lead.follow_up_date && <span title={`Follow-up: ${lead.follow_up_date}`}>📅</span>}
+              </span>
+            : 'Details'
+          }
+        </button>
+      </td>
     </tr>
   )
 }
@@ -476,7 +592,6 @@ function LeadRow({ lead, index, onFindContacts, status, onStatusChange }) {
    TABLE HEADERS — exact same order as columns above
    ════════════════════════════════════════════════════════════════════ */
 const HEADERS = [
-  // { label, sortable }
   { label: '#',               sortable: false },
   { label: 'Company Name',    sortable: true  },
   { label: 'Email',           sortable: false },
@@ -488,6 +603,7 @@ const HEADERS = [
   { label: 'Status',          sortable: false },
   { label: 'Website',         sortable: false },
   { label: 'Contacts',        sortable: false },
+  { label: 'Details',         sortable: false },
 ]
 
 /* ════════════════════════════════════════════════════════════════════
@@ -500,6 +616,8 @@ export default function LeadsTable({
   searchQuery,
   sortDir,
   onSortChange,
+  onStatusUpdate,   // (leadId, newStatus, updatedLeadDoc) => void
+  onLeadUpdate,     // (updatedLeadDoc) => void — called after notes/follow-up saved
 }) {
   const isEmpty = !isLoading && !error && leads.length === 0
 
@@ -507,14 +625,33 @@ export default function LeadsTable({
   const [activeLead, setActiveLead] = useState(null)
   const pdlHook = usePDLSearch()
 
-  // CRM status per lead — keyed by lead.id or company_name
-  // Persisted in component state (survives re-renders, resets on page reload)
+  // Detail panel state (notes + follow-up)
+  const [detailLead, setDetailLead] = useState(null)
+
   const [statusMap, setStatusMap] = useState({})
 
   const handleFindContacts = (lead) => setActiveLead(lead)
   const handleClosePDL     = () => { setActiveLead(null); pdlHook.clear() }
-  const handleStatusChange = (leadId, newStatus) =>
+
+  const handleOpenDetail  = (lead) => setDetailLead(lead)
+  const handleCloseDetail = () => setDetailLead(null)
+
+  const handleStatusUpdate = (leadId, newStatus, updatedLead) => {
     setStatusMap(prev => ({ ...prev, [leadId]: newStatus }))
+    if (onStatusUpdate) onStatusUpdate(leadId, newStatus, updatedLead)
+  }
+
+  // Called from LeadDetailPanel after notes/follow-up saved
+  const handleLeadUpdate = (updatedDoc) => {
+    if (detailLead) setDetailLead(updatedDoc)
+    if (onLeadUpdate) onLeadUpdate(updatedDoc)
+  }
+
+  // Resolve effective status: prefer local override, then lead.status, default "new"
+  const getStatus = (lead) => {
+    const key = lead.id ?? lead._id ?? lead.company_name
+    return statusMap[key] ?? lead.status ?? 'new'
+  }
 
   return (
     <>
@@ -558,8 +695,9 @@ export default function LeadsTable({
                       lead={lead}
                       index={i}
                       onFindContacts={handleFindContacts}
-                      status={statusMap[lead.id ?? lead.company_name] || ''}
-                      onStatusChange={handleStatusChange}
+                      onOpenDetail={handleOpenDetail}
+                      status={getStatus(lead)}
+                      onStatusUpdate={handleStatusUpdate}
                     />
                   ))
               }
@@ -597,12 +735,21 @@ export default function LeadsTable({
         )}
       </div>
 
-      {/* PDL Contacts Drawer — rendered outside the table */}
+      {/* PDL Contacts Drawer */}
       {activeLead && (
         <PDLContactsPanel
           lead={activeLead}
           onClose={handleClosePDL}
           hook={pdlHook}
+        />
+      )}
+
+      {/* Lead Detail Panel (notes + follow-up) */}
+      {detailLead && (
+        <LeadDetailPanel
+          lead={detailLead}
+          onClose={handleCloseDetail}
+          onLeadUpdate={handleLeadUpdate}
         />
       )}
     </>

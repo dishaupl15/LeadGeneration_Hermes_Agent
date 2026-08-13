@@ -291,6 +291,25 @@ class MongoLeadDoc(BaseModel):
     created_at:   Optional[str] = Field(default=None)
     updated_at:   Optional[str] = Field(default=None)
 
+    # ── CRM status ─────────────────────────────────────────────────────────
+    status:            Optional[str] = Field(
+        default="new",
+        description="CRM qualification status: new | interested | not_interested",
+    )
+    status_updated_at: Optional[str] = Field(default=None)
+
+    # ── Notes (array of {text, created_at} objects) ────────────────────────
+    notes: list[dict] = Field(
+        default_factory=list,
+        description="Array of CRM notes: [{text, created_at}]",
+    )
+
+    # ── Follow-up date (nullable ISO date string YYYY-MM-DD) ───────────────
+    follow_up_date: Optional[str] = Field(
+        default=None,
+        description="Scheduled follow-up date (YYYY-MM-DD) or null",
+    )
+
     # ── Field-level evidence model ─────────────────────────────────────────
     # Internal waterfall metadata: which provider contributed each field.
     # Stored in MongoDB so audit tools can show provider breakdown.

@@ -110,12 +110,14 @@ async def ensure_lead_indexes(
       - website (unique-ish, used for deduplication)
       - company_name
       - created_at (for sorted queries)
+      - status     (for status filter counts)
     """
     coll_name = collection_for_category(category)
     coll = db[coll_name]
     await coll.create_index("website", background=True, sparse=True)
     await coll.create_index("company_name", background=True)
     await coll.create_index("created_at", background=True)
+    await coll.create_index("status", background=True)
 
 
 async def _ensure_history_indexes(db: motor.motor_asyncio.AsyncIOMotorDatabase) -> None:

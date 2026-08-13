@@ -505,14 +505,17 @@ async def enrich_company_contacts(
     company_name: str,
     domain: Optional[str] = None,
     website: Optional[str] = None,
+    origami_contacts: Optional[list] = None,
 ) -> PeopleEnrichmentResult:
     """
     Waterfall people-enrichment for one company.
 
     Waterfall:
+      0. Origami seed  (if origami_contacts provided — pre-seeded from origami_service)
       1. PDL    → if useful_contacts >= TARGET: stop
       2. Prospeo → if useful_contacts >= TARGET: stop
       3. ContactOut
+      4. Hunter.io fallback (if no emails found)
       → dedup → merge → rank → return
 
     Domain is preferred for all provider calls.
@@ -520,9 +523,12 @@ async def enrich_company_contacts(
     Company name is normalised before use (strips legal suffixes).
 
     Args:
-        company_name: Required — used for name-match fallback.
-        domain:       Bare domain e.g. "example.com" (preferred).
-        website:      Full URL — domain is extracted when domain is absent.
+        company_name:     Required — used for name-match fallback.
+        domain:           Bare domain e.g. "example.com" (preferred).
+        website:          Full URL — domain is extracted when domain is absent.
+        origami_contacts: Optional list of raw contact dicts from Origami.
+                          These are seeded into the dedup pool before PDL runs
+                          so any duplicates across providers are merged cleanly.
 
     Returns:
         PeopleEnrichmentResult with merged, deduped, ranked contacts.
@@ -551,6 +557,25 @@ async def enrich_company_contacts(
     all_raw:        list[dict]               = []
     provider_stats: dict[str, ProviderStats] = {}
     providers_used: list[str]                = []
+
+    # ════════════════════════════════════════════════════════════════════════
+    # STEP 0 — Origami (optional pre-seed)
+    # Origami contacts are staged in company["_origami_contacts"] by
+    # app/services/origami_service.py which runs earlier in the pipeline.
+    # Injected here so dedup_and_merge() treats them alongside PDL/Prospeo/
+    # ContactOut contacts — cross-provider duplicates are merged cleanly.
+    # ════════════════════════════════════════════════════════════════════════
+    _origami_seed: list[dict] = list(origami_contacts or [])
+    if _origami_seed:
+        _log(f"--- Origami seed: {len(_origami_seed)} contacts ---")
+        all_raw.extend(_origami_seed)
+        providers_used.append("origami")
+        provider_stats["origami"] = ProviderStats(
+            called=True,
+            contacts_found=len(_origami_seed),
+            emails_found=sum(1 for c in _origami_seed if c.get("email")),
+            phones_found=sum(1 for c in _origami_seed if c.get("phone")),
+        )
 
     # ════════════════════════════════════════════════════════════════════════
     # STEP 1 — PDL

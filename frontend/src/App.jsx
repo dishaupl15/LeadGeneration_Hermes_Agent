@@ -3,6 +3,7 @@ import LeadGeneration from './pages/LeadGeneration'
 import FormLeads from './pages/FormLeads'
 import PublicForm from './pages/PublicForm'
 import SocialLeads from './pages/SocialLeads'
+import OrigamiEnrichment from './pages/OrigamiEnrichment'
 
 export default function App() {
   return (
@@ -15,6 +16,9 @@ export default function App() {
 
       {/* Social leads dashboard */}
       <Route path="/social-leads"  element={<SocialLeads />} />
+
+      {/* Origami enrichment — standalone, removable module */}
+      <Route path="/origami"       element={<OrigamiEnrichment />} />
 
       {/* Public form (from tracking links) */}
       <Route path="/f/:form_id"    element={<PublicForm />} />

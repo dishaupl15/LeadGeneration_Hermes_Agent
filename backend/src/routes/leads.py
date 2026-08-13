@@ -566,8 +566,22 @@ async def generate_leads(payload: GenerateLeadsRequest):
             "primary_type":        company.get("primary_type"),
             "latitude":            company.get("latitude"),
             "longitude":           company.get("longitude"),
-            # People enrichment contacts (PDL → Prospeo → ContactOut)
+            # People enrichment contacts (PDL → Prospeo → ContactOut merged + Origami)
             "contacts":            company.get("contacts", []),
+            # Origami people array — all contacts found by Origami with tier labels
+            # (structured for CRM display: Founder | CEO | Director | …)
+            "people":              company.get("people", []),
+            # Origami enrichment metadata
+            "origami_enriched":    company.get("origami_enriched", False),
+            "origami_confidence":  company.get("origami_confidence", 0.0),
+            "origami_source":      company.get("origami_source", ""),
+            # Founder discovery status — "found" | "found_decision_maker" |
+            # "not_found" | "skipped" | "error"  (never fabricated)
+            "founder_status":      company.get("founder_status", "skipped"),
+            # Origami-specific founder fields (only set when sourced, never guessed)
+            "founder_title":       company.get("founder_title"),
+            "founder_email":       company.get("founder_email"),
+            "founder_profile_url": company.get("founder_profile_url"),
         }
         if last_verified:
             set_fields["last_verified"] = last_verified
@@ -581,7 +595,12 @@ async def generate_leads(payload: GenerateLeadsRequest):
             filter_key,
             {
                 "$set": set_fields,
-                "$setOnInsert": {"created_at": now, "generation_run_id": run_id},
+                "$setOnInsert": {
+                    "created_at":       now,
+                    "generation_run_id": run_id,
+                    "status":           "new",   # default status for every new lead
+                    "status_updated_at": now.isoformat(),
+                },
             },
             upsert=True,
         )
@@ -683,6 +702,10 @@ async def generate_leads(payload: GenerateLeadsRequest):
         f"contacts={n_contacts}/{len(unique)} | "
         f"contact_emails={n_contact_emails} | "
         f"contact_phones={n_contact_phones} | "
+        f"origami_calls={ps.get('origami_calls', 0)} | "
+        f"origami_contacts={ps.get('origami_contacts_found', 0)} | "
+        f"origami_founders={ps.get('origami_founders_found', 0)} | "
+        f"origami_emails={ps.get('origami_emails_found', 0)} | "
         f"gmaps_discovered={ps.get('google_maps_discovered', 0)} | "
         f"gmaps_dupes={ps.get('google_maps_duplicates', 0)} | "
         f"ce_calls={ps.get('companyenrich_calls', 0)} | "
@@ -701,6 +724,12 @@ async def generate_leads(payload: GenerateLeadsRequest):
         "firecrawl_fields_filled":     ps.get("firecrawl_fields_filled", 0),
         "final_valid_companies":       ps.get("final_valid_companies", len(unique)),
         "db_dedup_skipped":            len(dupe_companies),
+        # Origami enrichment stats
+        "origami_calls":               ps.get("origami_calls", 0),
+        "origami_contacts_found":      ps.get("origami_contacts_found", 0),
+        "origami_founders_found":      ps.get("origami_founders_found", 0),
+        "origami_emails_found":        ps.get("origami_emails_found", 0),
+        "origami_skipped":             ps.get("origami_skipped", 0),
         # People enrichment orchestrator
         "people_companies_processed":  ps.get("people_companies_processed", 0),
         "people_contacts_found":       ps.get("people_contacts_found", 0),
@@ -783,31 +812,28 @@ async def generate_leads(payload: GenerateLeadsRequest):
     tags=["Leads"],
 )
 async def get_leads(
-    category: Optional[str] = Query(
-        None,
-        description="Filter by industry category — reads from the category-specific collection",
-    ),
-    search:   Optional[str] = Query(None, description="Filter by company name (case-insensitive)"),
-    page:     int           = Query(1,   ge=1),
-    per_page: int           = Query(100, ge=1, le=500),
+    category:  Optional[str] = Query(None, description="Filter by industry category"),
+    search:    Optional[str] = Query(None, description="Search across company_name, email, phones, founder_name"),
+    status:    Optional[str] = Query(None, description="Filter by status: new|interested|not_interested"),
+    tab:       Optional[str] = Query(None, description="Smart tab: new_leads|old_untouched|interested|not_interested|follow_ups|all"),
+    date_from: Optional[str] = Query(None, description="Filter created_at >= YYYY-MM-DD"),
+    date_to:   Optional[str] = Query(None, description="Filter created_at <= YYYY-MM-DD"),
+    page:      int           = Query(1,   ge=1),
+    per_page:  int           = Query(100, ge=1, le=500),
 ):
     """
-    Fetch stored leads from MongoDB — no AI, no scraping.
-
-    If `category` is provided, reads from the category-specific collection
-    (e.g. leads_construction).  Otherwise reads from the legacy 'leads' collection.
+    Fetch stored leads from MongoDB with server-side filtering.
+    Delegates filter building to _build_leads_filter().
     """
-    db         = get_db()
-    coll_name  = collection_for_category(category) if category else COLLECTION_NAME
-    collection = db[coll_name]
+    db        = get_db()
+    coll_name = collection_for_category(category) if category else COLLECTION_NAME
+    coll      = db[coll_name]
 
-    mongo_filter: dict = {}
-    if search:
-        mongo_filter["company_name"] = {"$regex": search, "$options": "i"}
+    mongo_filter = _build_leads_filter(tab, status, search, date_from, date_to)
 
-    total   = await collection.count_documents(mongo_filter)
+    total   = await coll.count_documents(mongo_filter)
     skip    = (page - 1) * per_page
-    cursor  = collection.find(mongo_filter).sort("created_at", -1).skip(skip).limit(per_page)
+    cursor  = coll.find(mongo_filter).sort("created_at", -1).skip(skip).limit(per_page)
     db_docs = await cursor.to_list(length=per_page)
 
     leads_out = []
@@ -827,6 +853,129 @@ async def get_leads(
         timestamp=datetime.now(timezone.utc).isoformat(),
         leads=leads_out,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /leads/status-counts  — MUST be before /leads/{lead_id} so FastAPI does
+# not treat the literal string "status-counts" as a lead_id wildcard.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/leads/status-counts",
+    summary="Count leads by status + smart tabs for a category",
+    response_model=dict,
+    tags=["Leads"],
+)
+async def get_status_counts(
+    category: Optional[str] = Query(None, description="Industry category — routes to correct collection"),
+):
+    """
+    Returns MongoDB counts for all tab views:
+      { new: N, old_untouched: N, interested: N, not_interested: N,
+        follow_ups: N, total: N }
+
+    new_leads     = status in [null/"new"] AND created_at >= now-2d
+    old_untouched = status in [null/"new"] AND created_at <  now-2d
+    interested    = status == "interested"
+    not_interested= status == "not_interested"
+    follow_ups    = follow_up_date is set (not null/empty)
+    total         = all documents
+    """
+    from datetime import timedelta
+
+    db        = get_db()
+    coll_name = collection_for_category(category) if category else COLLECTION_NAME
+    coll      = db[coll_name]
+
+    cutoff_2d = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+
+    new_status_filter = {"$or": [
+        {"status": "new"},
+        {"status": {"$exists": False}},
+        {"status": None},
+    ]}
+
+    # Run all counts in parallel-ish (sequential awaits, all fast index hits)
+    total            = await coll.count_documents({})
+    interested       = await coll.count_documents({"status": "interested"})
+    not_interested   = await coll.count_documents({"status": "not_interested"})
+    new_leads        = await coll.count_documents({"$and": [new_status_filter, {"created_at": {"$gte": cutoff_2d}}]})
+    old_untouched    = await coll.count_documents({"$and": [new_status_filter, {"created_at": {"$lt":  cutoff_2d}}]})
+    follow_ups       = await coll.count_documents({"follow_up_date": {"$nin": [None, ""]}})
+
+    return {
+        "success": True,
+        "category": category,
+        "counts": {
+            "new":           new_leads,
+            "old_untouched": old_untouched,
+            "interested":    interested,
+            "not_interested": not_interested,
+            "follow_ups":    follow_ups,
+            "total":         total,
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /leads/follow-ups  — MUST be before /leads/{lead_id} so FastAPI does
+# not treat the literal string "follow-ups" as a lead_id wildcard.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/leads/follow-ups",
+    summary="Get today's and upcoming follow-up leads across all collections",
+    response_model=dict,
+    tags=["Leads"],
+)
+async def get_follow_ups(
+    category: Optional[str] = Query(None, description="Limit to one category collection"),
+):
+    """
+    Returns two lists:
+      - today:    leads with follow_up_date == today (UTC)
+      - upcoming: leads with follow_up_date > today (next 30 days)
+    """
+    from datetime import date, timedelta
+
+    db       = get_db()
+    today    = date.today().isoformat()          # "YYYY-MM-DD"
+    in_30    = (date.today() + timedelta(days=30)).isoformat()
+
+    # Decide which collections to scan
+    if category:
+        colls = [collection_for_category(category)]
+    else:
+        cats_cursor = db[CATEGORIES_COLLECTION].find({}, {"collection": 1, "_id": 0})
+        cats_docs   = await cats_cursor.to_list(length=500)
+        colls = list({d["collection"] for d in cats_docs if d.get("collection")})
+        if not colls:
+            colls = [COLLECTION_NAME]
+
+    today_leads:    list[dict] = []
+    upcoming_leads: list[dict] = []
+
+    for cname in colls:
+        coll = db[cname]
+        cursor = coll.find(
+            {"follow_up_date": {"$gte": today, "$lte": in_30}},
+            {"company_name": 1, "email": 1, "company_number": 1,
+             "follow_up_date": 1, "status": 1, "category": 1, "_id": 1},
+        ).sort("follow_up_date", 1)
+        async for doc in cursor:
+            doc["id"] = str(doc.pop("_id"))
+            if doc.get("follow_up_date") == today:
+                today_leads.append(doc)
+            else:
+                upcoming_leads.append(doc)
+
+    return {
+        "success":  True,
+        "today":    today_leads,
+        "upcoming": upcoming_leads,
+        "today_count":    len(today_leads),
+        "upcoming_count": len(upcoming_leads),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -895,51 +1044,885 @@ class _StatusUpdateBody(_StatusBodyBase):
     category: Optional[str] = None
 
 
+class _NoteBody(_StatusBodyBase):
+    text:     str
+    category: Optional[str] = None
+
+
+class _FollowUpBody(_StatusBodyBase):
+    follow_up_date: Optional[str] = None   # ISO date string "YYYY-MM-DD" or null to clear
+    category:       Optional[str] = None
+
+
+# The three allowed statuses for the lead status management feature.
+# Leads are generated with status = "new" by default.
+LEAD_STATUSES = {"new", "interested", "not_interested"}
+
+
 @router.patch(
     "/leads/{lead_id}/status",
-    summary="Update CRM status for a lead",
+    summary="Update CRM status for a lead (new | interested | not_interested)",
     response_model=dict,
     tags=["Leads"],
 )
 async def update_lead_status(lead_id: str, payload: _StatusUpdateBody):
     """
-    Update the CRM status field for a lead.
-    Valid values: new | contacted | follow_up | interested | not_interested | closed
+    Update the status field of an existing lead document.
 
-    The `category` param routes to the correct per-category collection.
+    Allowed values: new | interested | not_interested
+
+    - Finds the lead by MongoDB ObjectId across the correct category collection.
+    - Writes  status = payload.status  and  status_updated_at = utcnow.
+    - Returns the full updated lead document so the UI can update immediately.
+    - Never creates a duplicate lead.
     """
     from bson import ObjectId
     from bson.errors import InvalidId
 
-    VALID_STATUSES = {
-        "", "new", "contacted", "follow_up",
-        "interested", "not_interested", "closed",
-    }
-    if payload.status not in VALID_STATUSES:
+    if payload.status not in LEAD_STATUSES:
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid status '{payload.status}'",
+            detail=f"Invalid status '{payload.status}'. Allowed: {sorted(LEAD_STATUSES)}",
         )
 
-    db         = get_db()
-    coll_name  = collection_for_category(payload.category) if payload.category else COLLECTION_NAME
-    collection = db[coll_name]
+    db        = get_db()
+    now       = datetime.now(timezone.utc)
+
+    # Route to the correct per-category collection (or legacy fallback)
+    coll_name = collection_for_category(payload.category) if payload.category else None
+
+    # Try to build an ObjectId from lead_id
+    try:
+        oid = ObjectId(lead_id)
+    except (InvalidId, Exception):
+        oid = None
+
+    # Search strategy:
+    #  1. If category given → look only in that collection
+    #  2. Otherwise → try the legacy "leads" collection first, then scan all known categories
+    async def _try_update(cname: str):
+        coll   = db[cname]
+        flt    = {"_id": oid} if oid else {"id": lead_id}
+        result = await coll.update_one(
+            flt,
+            {"$set": {
+                "status":            payload.status,
+                "status_updated_at": now.isoformat(),
+                "updated_at":        now,
+            }},
+        )
+        if result.matched_count > 0:
+            doc = await coll.find_one(flt)
+            return doc
+        return None
+
+    updated_doc = None
+
+    if coll_name:
+        updated_doc = await _try_update(coll_name)
+    else:
+        # Try legacy collection first
+        updated_doc = await _try_update(COLLECTION_NAME)
+        if not updated_doc:
+            # Walk all known category collections
+            cats_cursor = db[CATEGORIES_COLLECTION].find(
+                {}, {"collection": 1, "_id": 0}
+            )
+            async for cat in cats_cursor:
+                c = cat.get("collection")
+                if c and c != COLLECTION_NAME:
+                    updated_doc = await _try_update(c)
+                    if updated_doc:
+                        break
+
+    if not updated_doc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Lead '{lead_id}' not found. Pass 'category' to route to the correct collection.",
+        )
+
+    # Serialize ObjectId → string
+    updated_doc["id"] = str(updated_doc.pop("_id"))
+    for ts in ("created_at", "updated_at"):
+        if isinstance(updated_doc.get(ts), datetime):
+            updated_doc[ts] = updated_doc[ts].isoformat()
+
+    return {
+        "success":          True,
+        "lead_id":          lead_id,
+        "status":           payload.status,
+        "status_updated_at": now.isoformat(),
+        "lead":             updated_doc,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /leads/{lead_id}/notes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/leads/{lead_id}/notes",
+    summary="Add a note to an existing lead",
+    response_model=dict,
+    tags=["Leads"],
+)
+async def add_lead_note(lead_id: str, payload: _NoteBody):
+    """
+    Append a note to the lead's `notes` array inside the existing document.
+    Never creates a new lead document.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Note text cannot be empty.")
+    if len(text) > 2000:
+        raise HTTPException(status_code=422, detail="Note text must be ≤ 2000 characters.")
+
+    db  = get_db()
+    now = datetime.now(timezone.utc)
+    note = {"text": text, "created_at": now.isoformat()}
 
     try:
         oid = ObjectId(lead_id)
-        flt = {"_id": oid}
     except (InvalidId, Exception):
-        flt = {"id": lead_id}
+        oid = None
 
-    result = await collection.update_one(
-        flt,
-        {"$set": {"status_update": payload.status, "updated_at": datetime.now(timezone.utc)}},
+    coll_name = collection_for_category(payload.category) if payload.category else None
+
+    async def _try_add(cname: str):
+        coll = db[cname]
+        flt  = {"_id": oid} if oid else {"id": lead_id}
+        result = await coll.update_one(
+            flt,
+            {"$push": {"notes": note}, "$set": {"updated_at": now}},
+        )
+        if result.matched_count > 0:
+            return await coll.find_one(flt)
+        return None
+
+    doc = None
+    if coll_name:
+        doc = await _try_add(coll_name)
+    else:
+        doc = await _try_add(COLLECTION_NAME)
+        if not doc:
+            async for cat in db[CATEGORIES_COLLECTION].find({}, {"collection": 1, "_id": 0}):
+                c = cat.get("collection")
+                if c and c != COLLECTION_NAME:
+                    doc = await _try_add(c)
+                    if doc:
+                        break
+
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Lead '{lead_id}' not found.")
+
+    doc["id"] = str(doc.pop("_id"))
+    for ts in ("created_at", "updated_at"):
+        if isinstance(doc.get(ts), datetime):
+            doc[ts] = doc[ts].isoformat()
+
+    return {"success": True, "note": note, "lead": doc}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATCH /leads/{lead_id}/follow-up
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.patch(
+    "/leads/{lead_id}/follow-up",
+    summary="Set or clear the follow-up date for a lead",
+    response_model=dict,
+    tags=["Leads"],
+)
+async def update_follow_up(lead_id: str, payload: _FollowUpBody):
+    """
+    Set `follow_up_date` (ISO date string "YYYY-MM-DD") or clear it (null).
+    Validates the date format when provided.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+    import re as _re
+
+    fud = (payload.follow_up_date or "").strip() or None
+    if fud and not _re.match(r'^\d{4}-\d{2}-\d{2}$', fud):
+        raise HTTPException(status_code=422, detail="follow_up_date must be YYYY-MM-DD or null.")
+
+    db  = get_db()
+    now = datetime.now(timezone.utc)
+
+    try:
+        oid = ObjectId(lead_id)
+    except (InvalidId, Exception):
+        oid = None
+
+    coll_name = collection_for_category(payload.category) if payload.category else None
+
+    async def _try_update(cname: str):
+        coll = db[cname]
+        flt  = {"_id": oid} if oid else {"id": lead_id}
+        result = await coll.update_one(
+            flt,
+            {"$set": {"follow_up_date": fud, "updated_at": now}},
+        )
+        if result.matched_count > 0:
+            return await coll.find_one(flt)
+        return None
+
+    doc = None
+    if coll_name:
+        doc = await _try_update(coll_name)
+    else:
+        doc = await _try_update(COLLECTION_NAME)
+        if not doc:
+            async for cat in db[CATEGORIES_COLLECTION].find({}, {"collection": 1, "_id": 0}):
+                c = cat.get("collection")
+                if c and c != COLLECTION_NAME:
+                    doc = await _try_update(c)
+                    if doc:
+                        break
+
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Lead '{lead_id}' not found.")
+
+    doc["id"] = str(doc.pop("_id"))
+    for ts in ("created_at", "updated_at"):
+        if isinstance(doc.get(ts), datetime):
+            doc[ts] = doc[ts].isoformat()
+
+    return {"success": True, "follow_up_date": fud, "lead": doc}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared helper — build a MongoDB filter dict from the standard query params
+# (reused by GET /leads, GET /leads/export/csv, GET /leads/export/excel)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_leads_filter(
+    tab:       Optional[str],
+    status:    Optional[str],
+    search:    Optional[str],
+    date_from: Optional[str],
+    date_to:   Optional[str],
+) -> dict:
+    """Return a MongoDB filter dict from the standard query params."""
+    from datetime import timedelta
+
+    mongo_filter: dict = {}
+    cutoff_2d = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+
+    new_status_filter = {"$or": [
+        {"status": "new"},
+        {"status": {"$exists": False}},
+        {"status": None},
+    ]}
+
+    if tab == "new_leads":
+        mongo_filter["$and"] = [
+            new_status_filter,
+            {"created_at": {"$gte": cutoff_2d}},
+        ]
+    elif tab == "old_untouched":
+        mongo_filter["$and"] = [
+            new_status_filter,
+            {"created_at": {"$lt": cutoff_2d}},
+        ]
+    elif tab == "interested":
+        mongo_filter["status"] = "interested"
+    elif tab == "not_interested":
+        mongo_filter["status"] = "not_interested"
+    elif tab == "follow_ups":
+        mongo_filter["follow_up_date"] = {"$nin": [None, ""]}
+    elif status:
+        if status == "new":
+            mongo_filter.update(new_status_filter)
+        else:
+            mongo_filter["status"] = status
+
+    # Date range
+    if date_from or date_to:
+        date_filter: dict = {}
+        if date_from:
+            date_filter["$gte"] = f"{date_from}T00:00:00"
+        if date_to:
+            date_filter["$lte"] = f"{date_to}T23:59:59"
+        existing_and = mongo_filter.get("$and")
+        if existing_and:
+            existing_and.append({"created_at": date_filter})
+        else:
+            existing_ca = mongo_filter.get("created_at")
+            if existing_ca:
+                mongo_filter["$and"] = [{"created_at": existing_ca}, {"created_at": date_filter}]
+                del mongo_filter["created_at"]
+            else:
+                mongo_filter["created_at"] = date_filter
+
+    # Multi-field search
+    if search and search.strip():
+        q = search.strip()
+        search_cond = {"$or": [
+            {"company_name":   {"$regex": q, "$options": "i"}},
+            {"email":          {"$regex": q, "$options": "i"}},
+            {"emails":         {"$regex": q, "$options": "i"}},
+            {"company_number": {"$regex": q, "$options": "i"}},
+            {"phones":         {"$regex": q, "$options": "i"}},
+            {"founder_name":   {"$regex": q, "$options": "i"}},
+            {"founder_number": {"$regex": q, "$options": "i"}},
+            {"address":        {"$regex": q, "$options": "i"}},
+        ]}
+        existing_and = mongo_filter.get("$and")
+        if existing_and:
+            existing_and.append(search_cond)
+        elif "$or" in mongo_filter:
+            mongo_filter["$and"] = [{"$or": mongo_filter.pop("$or")}, search_cond]
+        else:
+            mongo_filter.update(search_cond)
+
+    return mongo_filter
+
+
+def _doc_to_export_row(doc: dict) -> dict:
+    """Flatten a MongoDB lead document into a flat export row."""
+    # Resolve email
+    email = doc.get("email") or ""
+    if not email and doc.get("emails"):
+        email = doc["emails"][0] if isinstance(doc["emails"], list) else str(doc["emails"])
+
+    # Resolve phone
+    phone = doc.get("company_number") or ""
+    if not phone and doc.get("phones"):
+        phone = doc["phones"][0] if isinstance(doc["phones"], list) else str(doc["phones"])
+
+    # Flatten notes → one cell
+    notes_list = doc.get("notes") or []
+    if notes_list:
+        parts = []
+        for n in notes_list:
+            ts  = n.get("created_at", "")[:10] if isinstance(n, dict) else ""
+            txt = n.get("text", "") if isinstance(n, dict) else str(n)
+            parts.append(f"[{ts}] {txt}" if ts else txt)
+        notes_str = " | ".join(parts)
+    else:
+        notes_str = ""
+
+    # created_at — keep only date part
+    raw_created = doc.get("created_at") or ""
+    created_date = str(raw_created)[:10] if raw_created else ""
+
+    return {
+        "Name":          doc.get("founder_name") or "",
+        "Email":         email,
+        "Phone":         phone,
+        "Company":       doc.get("company_name") or "",
+        "Designation":   doc.get("designation") or "",
+        "Category":      doc.get("category") or "",
+        "Platform":      doc.get("platform") or doc.get("research_source") or "",
+        "Form":          doc.get("form_name") or doc.get("generation_run_id") or "",
+        "Status":        doc.get("status") or "new",
+        "Notes":         notes_str,
+        "Follow-up Date": doc.get("follow_up_date") or "",
+        "Created Date":  created_date,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /leads/export/csv  — MUST be before /leads/{lead_id}
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/leads/export/csv",
+    summary="Export filtered leads as CSV",
+    tags=["Leads"],
+)
+async def export_leads_csv(
+    category:  Optional[str] = Query(None),
+    tab:       Optional[str] = Query(None),
+    status:    Optional[str] = Query(None),
+    search:    Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to:   Optional[str] = Query(None),
+):
+    """Stream a CSV file of all leads matching the current filters (no pagination limit)."""
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+
+    db        = get_db()
+    coll_name = collection_for_category(category) if category else COLLECTION_NAME
+    coll      = db[coll_name]
+
+    mongo_filter = _build_leads_filter(tab, status, search, date_from, date_to)
+    cursor = coll.find(mongo_filter).sort("created_at", -1)
+    docs   = await cursor.to_list(length=10000)
+
+    output = io.StringIO()
+    columns = ["Name","Email","Phone","Company","Designation","Category",
+               "Platform","Form","Status","Notes","Follow-up Date","Created Date"]
+    writer = csv.DictWriter(output, fieldnames=columns, lineterminator="\n")
+    writer.writeheader()
+    for doc in docs:
+        doc["id"] = str(doc.pop("_id", ""))
+        writer.writerow(_doc_to_export_row(doc))
+
+    output.seek(0)
+    filename = f"leads_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail=f"Lead '{lead_id}' not found")
 
-    return {"success": True, "lead_id": lead_id, "status": payload.status}
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /leads/export/excel  — MUST be before /leads/{lead_id}
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/leads/export/excel",
+    summary="Export filtered leads as Excel (.xlsx)",
+    tags=["Leads"],
+)
+async def export_leads_excel(
+    category:  Optional[str] = Query(None),
+    tab:       Optional[str] = Query(None),
+    status:    Optional[str] = Query(None),
+    search:    Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to:   Optional[str] = Query(None),
+):
+    """Stream an XLSX file of all leads matching the current filters."""
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+
+    db        = get_db()
+    coll_name = collection_for_category(category) if category else COLLECTION_NAME
+    coll      = db[coll_name]
+
+    mongo_filter = _build_leads_filter(tab, status, search, date_from, date_to)
+    cursor = coll.find(mongo_filter).sort("created_at", -1)
+    docs   = await cursor.to_list(length=10000)
+
+    columns = ["Name","Email","Phone","Company","Designation","Category",
+               "Platform","Form","Status","Notes","Follow-up Date","Created Date"]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Leads"
+
+    # Header row styling
+    header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    for col_idx, col_name in enumerate(columns, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.fill  = header_fill
+        cell.font  = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # Data rows
+    for row_idx, doc in enumerate(docs, start=2):
+        doc["id"] = str(doc.pop("_id", ""))
+        row = _doc_to_export_row(doc)
+        for col_idx, col_name in enumerate(columns, start=1):
+            val  = row.get(col_name, "")
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    # Auto-fit column widths (cap at 60)
+    for col_idx, col_name in enumerate(columns, start=1):
+        col_letter = ws.cell(row=1, column=col_idx).column_letter
+        max_len    = max(
+            len(col_name),
+            *(len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(2, len(docs) + 2))
+        ) if docs else len(col_name)
+        ws.column_dimensions[col_letter].width = min(max_len + 4, 60)
+
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = f"leads_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /leads/origami-stats  — MUST be before /leads/{lead_id}
+# Returns real Origami coverage stats calculated from the actual database.
+# NEVER hardcodes percentages.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/leads/origami-stats",
+    summary="Origami enrichment coverage stats from actual database data",
+    response_model=dict,
+    tags=["Leads"],
+)
+async def get_origami_stats(
+    category: Optional[str] = Query(None, description="Industry category — routes to correct collection"),
+):
+    """
+    Calculate Origami coverage statistics from the actual MongoDB data.
+
+    Returns:
+      total_leads          — total documents in collection
+      origami_enriched     — count with origami_enriched=True
+      founder_found        — count with founder_name set
+      founder_email_found  — count with founder_email OR email set (where origami_enriched=True)
+      origami_percent      — origami_enriched / total * 100
+      founder_percent      — founder_found / total * 100
+      founder_email_percent — founder_email_found / founder_found * 100
+      status_breakdown     — { found: N, found_decision_maker: N, not_found: N, skipped: N, error: N }
+    """
+    db        = get_db()
+    coll_name = collection_for_category(category) if category else COLLECTION_NAME
+    coll      = db[coll_name]
+
+    total = await coll.count_documents({})
+    if total == 0:
+        return {
+            "success": True,
+            "total_leads": 0,
+            "origami_enriched": 0,
+            "founder_found": 0,
+            "founder_email_found": 0,
+            "origami_percent": 0.0,
+            "founder_percent": 0.0,
+            "founder_email_percent": 0.0,
+            "status_breakdown": {},
+        }
+
+    origami_enriched    = await coll.count_documents({"origami_enriched": True})
+    founder_found       = await coll.count_documents({"founder_name": {"$nin": [None, ""]}})
+    # Email coverage: leads where origami_enriched AND (founder_email OR email) is set
+    founder_email_found = await coll.count_documents({
+        "origami_enriched": True,
+        "$or": [
+            {"founder_email": {"$nin": [None, ""]}},
+            {"email":         {"$nin": [None, ""]}},
+        ],
+    })
+
+    # Status breakdown
+    for status_val in ("found", "found_decision_maker", "not_found", "skipped", "error"):
+        pass  # Will aggregate below
+
+    pipeline = [
+        {"$group": {"_id": "$founder_status", "count": {"$sum": 1}}},
+    ]
+    status_cursor = coll.aggregate(pipeline)
+    status_breakdown: dict = {}
+    async for row in status_cursor:
+        k = row.get("_id") or "unknown"
+        status_breakdown[k] = row.get("count", 0)
+
+    def _pct(num: int, denom: int) -> float:
+        if denom == 0:
+            return 0.0
+        return round(num / denom * 100, 1)
+
+    return {
+        "success":               True,
+        "total_leads":           total,
+        "origami_enriched":      origami_enriched,
+        "founder_found":         founder_found,
+        "founder_email_found":   founder_email_found,
+        "origami_percent":       _pct(origami_enriched, total),
+        "founder_percent":       _pct(founder_found, total),
+        "founder_email_percent": _pct(founder_email_found, max(founder_found, 1)),
+        "status_breakdown":      status_breakdown,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /leads/{lead_id}/enrich-origami
+# Trigger Origami enrichment for a single existing lead.
+# Does NOT create a new lead. Updates the existing document in-place.
+# Falls back gracefully if Origami API key is not set.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _OrigamiEnrichBody(_StatusBodyBase):
+    category: Optional[str] = None
+
+
+@router.post(
+    "/leads/{lead_id}/enrich-origami",
+    summary="Run Origami enrichment for a single lead",
+    response_model=dict,
+    tags=["Leads"],
+)
+async def enrich_lead_with_origami(lead_id: str, payload: _OrigamiEnrichBody):
+    """
+    Trigger Origami enrichment for one existing lead document.
+
+    Pipeline:
+      1. Fetch lead from MongoDB
+      2. Run enrich_company_with_origami()
+      3. For name-only contacts, forward to Prospeo/Hunter (_enrich_origami_founder_emails)
+      4. Run people waterfall (PDL → Prospeo → ContactOut → Hunter) with Origami seed
+      5. Merge & dedup contacts
+      6. Save back to MongoDB (never creates a duplicate)
+      7. Return the updated lead document
+
+    Fallback: if ORIGAMI_API_KEY is not set, skips Origami but still runs
+    the existing people waterfall so the caller gets fresh contact data.
+
+    Does NOT block lead generation — all failures are caught and logged.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    db        = get_db()
+    now       = datetime.now(timezone.utc)
+    coll_name = collection_for_category(payload.category) if payload.category else None
+
+    try:
+        oid = ObjectId(lead_id)
+    except (InvalidId, Exception):
+        oid = None
+
+    # ── Find the lead document ────────────────────────────────────────────────
+    doc = None
+
+    async def _find_in(cname: str):
+        coll = db[cname]
+        flt  = {"_id": oid} if oid else {"id": lead_id}
+        return await coll.find_one(flt)
+
+    if coll_name:
+        doc = await _find_in(coll_name)
+    else:
+        doc = await _find_in(COLLECTION_NAME)
+        if not doc:
+            cats_cursor = db[CATEGORIES_COLLECTION].find({}, {"collection": 1, "_id": 0})
+            async for cat in cats_cursor:
+                c = cat.get("collection")
+                if c and c != COLLECTION_NAME:
+                    doc = await _find_in(c)
+                    if doc:
+                        coll_name = c
+                        break
+
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Lead '{lead_id}' not found.")
+
+    # Determine which collection this doc lives in
+    if not coll_name:
+        coll_name = collection_for_category(doc.get("category") or "") or COLLECTION_NAME
+
+    # ── Convert bson ObjectId to string so enrichment service works ───────────
+    company = dict(doc)
+    company["_id"] = str(company.get("_id", ""))
+
+    t0 = time.monotonic()
+
+    # ── Step 1: Origami enrichment (graceful skip if key not set) ─────────────
+    origami_result: dict = {}
+    try:
+        from app.services.origami_service import (
+            enrich_company_with_origami,
+            is_configured as origami_configured,
+            _enrich_origami_founder_emails,
+        )
+
+        if origami_configured():
+            company = await enrich_company_with_origami(company)
+            origami_result = {
+                "origami_enriched":   company.get("origami_enriched", False),
+                "origami_confidence": company.get("origami_confidence", 0.0),
+                "founder_status":     company.get("founder_status", "skipped"),
+                "people_count":       len(company.get("people") or []),
+            }
+            # Email forwarding for name-only contacts
+            no_email_contacts = [
+                c for c in (company.get("_origami_contacts") or [])
+                if c.get("name") and not c.get("email") and company.get("domain")
+            ]
+            if no_email_contacts:
+                company = await _enrich_origami_founder_emails(company)
+        else:
+            company["origami_enriched"] = False
+            company["founder_status"]   = "skipped"
+            origami_result = {"origami_enriched": False, "founder_status": "skipped"}
+
+    except Exception as _orig_exc:
+        print(f"[ORIGAMI] Enrichment error for {lead_id}: {_orig_exc} — continuing with waterfall")
+        company.setdefault("origami_enriched", False)
+        company.setdefault("founder_status", "error")
+        origami_result = {"origami_enriched": False, "founder_status": "error", "error": str(_orig_exc)}
+
+    # ── Step 2: People waterfall (PDL → Prospeo → ContactOut → Hunter) ────────
+    origami_contacts = list(company.pop("_origami_contacts", None) or [])
+    waterfall_result: dict = {}
+    try:
+        from people_enrichment.orchestrator import enrich_company_contacts, reset_cache
+        reset_cache()
+
+        company_name = company.get("company_name", "")
+        domain       = company.get("domain") or ""
+        website      = company.get("website") or ""
+
+        result = await enrich_company_contacts(
+            company_name=company_name,
+            domain=domain or None,
+            website=website or None,
+            origami_contacts=origami_contacts if origami_contacts else None,
+        )
+
+        contacts_list = [
+            {
+                "name":         c.name,
+                "title":        c.title,
+                "email":        c.email,
+                "phone":        c.phone,
+                "linkedin_url": c.linkedin_url,
+                "sources":      list(c.sources),
+                "confidence":   c.confidence,
+            }
+            for c in result.contacts
+        ]
+        company["contacts"] = contacts_list
+
+        # Promote best contact email to company level if missing
+        if not company.get("email"):
+            for ct in contacts_list:
+                if ct.get("email"):
+                    company["email"] = ct["email"]
+                    break
+
+        waterfall_result = {
+            "contacts_found": result.contacts_found,
+            "emails_found":   result.emails_found,
+            "phones_found":   result.phones_found,
+            "providers_used": result.providers_used,
+        }
+
+    except Exception as _wf_exc:
+        print(f"[ORIGAMI] Waterfall error for {lead_id}: {_wf_exc}")
+        waterfall_result = {"error": str(_wf_exc)}
+
+    elapsed = round(time.monotonic() - t0, 2)
+
+    # ── Step 3: Write back to MongoDB ─────────────────────────────────────────
+    coll = db[coll_name]
+    flt  = {"_id": oid} if oid else {"id": lead_id}
+
+    set_fields = {
+        "origami_enriched":    company.get("origami_enriched", False),
+        "origami_confidence":  company.get("origami_confidence", 0.0),
+        "origami_source":      company.get("origami_source", "origami"),
+        "founder_status":      company.get("founder_status", "skipped"),
+        "founder_title":       company.get("founder_title"),
+        "founder_email":       company.get("founder_email"),
+        "founder_profile_url": company.get("founder_profile_url"),
+        "people":              company.get("people", []),
+        "contacts":            company.get("contacts", []),
+        "updated_at":          now,
+    }
+    # Promote origami-found founder fields without overwriting existing values
+    if company.get("founder_name") and not doc.get("founder_name"):
+        set_fields["founder_name"] = company["founder_name"]
+    if company.get("founder_number") and not doc.get("founder_number"):
+        set_fields["founder_number"] = company["founder_number"]
+    if company.get("email") and not doc.get("email"):
+        set_fields["email"] = company["email"]
+
+    try:
+        await coll.update_one(flt, {"$set": set_fields})
+    except Exception as _save_exc:
+        print(f"[ORIGAMI] MongoDB save error for {lead_id}: {_save_exc}")
+
+    # ── Return the updated document ───────────────────────────────────────────
+    updated_doc = await coll.find_one(flt)
+    if updated_doc:
+        updated_doc["id"] = str(updated_doc.pop("_id"))
+        for ts in ("created_at", "updated_at"):
+            if isinstance(updated_doc.get(ts), datetime):
+                updated_doc[ts] = updated_doc[ts].isoformat()
+
+    return {
+        "success":         True,
+        "lead_id":         lead_id,
+        "elapsed_seconds": elapsed,
+        "origami":         origami_result,
+        "waterfall":       waterfall_result,
+        "lead":            updated_doc,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /leads/bulk-enrich-origami
+# Bulk Origami enrichment for a list of lead IDs.
+# Runs enrichment concurrently (max 3 at a time) without blocking generation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _BulkOrigamiBody(_StatusBodyBase):
+    lead_ids: list[str]
+    category: Optional[str] = None
+    max_concurrency: int = 3
+
+
+@router.post(
+    "/leads/bulk-enrich-origami",
+    summary="Bulk Origami enrichment for a list of lead IDs",
+    response_model=dict,
+    tags=["Leads"],
+)
+async def bulk_enrich_origami(payload: _BulkOrigamiBody):
+    """
+    Enrich multiple leads with Origami concurrently.
+
+    - Runs up to max_concurrency enrichments in parallel.
+    - Each failure is isolated — one failure does NOT block others.
+    - Returns a summary with per-lead results.
+    """
+    import asyncio as _asyncio
+
+    lead_ids = payload.lead_ids or []
+    if not lead_ids:
+        raise HTTPException(status_code=422, detail="lead_ids cannot be empty.")
+    if len(lead_ids) > 100:
+        raise HTTPException(status_code=422, detail="Maximum 100 leads per bulk request.")
+
+    sem = _asyncio.Semaphore(min(payload.max_concurrency, 5))
+    results: list[dict] = []
+    t0 = time.monotonic()
+
+    async def _enrich_one(lid: str):
+        async with sem:
+            try:
+                body = _OrigamiEnrichBody(category=payload.category)
+                res  = await enrich_lead_with_origami(lid, body)
+                return {"lead_id": lid, "success": True, **res.get("origami", {})}
+            except HTTPException as he:
+                return {"lead_id": lid, "success": False, "error": he.detail}
+            except Exception as exc:
+                return {"lead_id": lid, "success": False, "error": str(exc)}
+
+    tasks = [_enrich_one(lid) for lid in lead_ids]
+    results = list(await _asyncio.gather(*tasks, return_exceptions=False))
+
+    succeeded     = sum(1 for r in results if r.get("success"))
+    enriched      = sum(1 for r in results if r.get("origami_enriched"))
+    founders_found= sum(1 for r in results if r.get("founder_status") in ("found", "found_decision_maker"))
+
+    return {
+        "success":        True,
+        "total":          len(lead_ids),
+        "succeeded":      succeeded,
+        "failed":         len(lead_ids) - succeeded,
+        "origami_enriched": enriched,
+        "founders_found": founders_found,
+        "elapsed_seconds": round(time.monotonic() - t0, 1),
+        "results":        results,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

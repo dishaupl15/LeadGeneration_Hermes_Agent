@@ -66,6 +66,12 @@ class _PipelineStats:
         self.firecrawl_calls      = 0
         self.firecrawl_filled     = 0
         self.final_companies      = 0
+        # Origami enrichment stats
+        self.origami_calls            = 0
+        self.origami_contacts_found   = 0
+        self.origami_founders_found   = 0
+        self.origami_emails_found     = 0
+        self.origami_skipped          = 0
         # People enrichment orchestrator stats
         self.people_companies_processed = 0
         self.people_contacts_found      = 0
@@ -98,6 +104,12 @@ def get_pipeline_stats() -> dict:
         "companyenrich_calls":        s.companyenrich_calls,
         "companyenrich_fields_filled": s.companyenrich_filled,
         "serper_calls":               s.serper_calls,
+        # Origami stats (inserted between serper/firecrawl and people blocks)
+        "origami_calls":              s.origami_calls,
+        "origami_contacts_found":     s.origami_contacts_found,
+        "origami_founders_found":     s.origami_founders_found,
+        "origami_emails_found":       s.origami_emails_found,
+        "origami_skipped":            s.origami_skipped,
         "serper_fields_filled":       s.serper_filled,
         "firecrawl_calls":            s.firecrawl_calls,
         "firecrawl_fields_filled":    s.firecrawl_filled,
@@ -767,10 +779,14 @@ async def _enrich_via_people_orchestrator(company: dict) -> dict:
             company_name=company_name,
             domain=domain or None,
             website=website or None,
+            origami_contacts=company.get("_origami_contacts") or None,
         )
     except Exception as exc:
         _log("PEOPLE_ENRICH", f"Orchestrator error for {company_name!r} — {type(exc).__name__}: {exc}")
         return company
+
+    # Remove staging field — not persisted to MongoDB
+    company.pop("_origami_contacts", None)
 
     # Attach the enriched contacts list to the company dict
     # Each contact is serialised to a plain dict for MongoDB storage
@@ -916,7 +932,45 @@ async def _enrich_one_company(company: dict) -> dict:
     if still_missing and company.get("website"):
         company = await _enrich_via_firecrawl(company, still_missing)
 
-    # Step 4: People enrichment waterfall (PDL → Prospeo → ContactOut)
+    # Step 4: Origami — optional decision-maker / founder enrichment layer.
+    # Runs BEFORE the PDL→Prospeo→ContactOut waterfall so any contacts Origami
+    # finds can complement (not duplicate) the existing people providers.
+    # Silently skipped when ORIGAMI_API_KEY is not set.
+    try:
+        from app.services.origami_service import enrich_company_with_origami, is_configured as origami_configured
+        if origami_configured():
+            _pipeline_stats.origami_calls += 1
+            company = await enrich_company_with_origami(company)
+            # Track Origami stats
+            origami_people = company.get("people") or []
+            _pipeline_stats.origami_contacts_found += len(origami_people)
+            _pipeline_stats.origami_emails_found   += sum(1 for p in origami_people if p.get("email"))
+            if company.get("founder_status") in ("found", "found_decision_maker"):
+                _pipeline_stats.origami_founders_found += 1
+
+            # Step 4b: For Origami contacts that have a name but no email,
+            # forward them to Prospeo/Hunter for email lookup.
+            # This runs only when Origami found a founder/decision-maker
+            # but their email wasn't returned by Origami directly.
+            origami_contacts_no_email = [
+                c for c in (company.get("_origami_contacts") or [])
+                if c.get("name") and not c.get("email")
+            ]
+            if origami_contacts_no_email and company.get("domain"):
+                from app.services.origami_service import _enrich_origami_founder_emails
+                company = await _enrich_origami_founder_emails(company)
+                # Recount emails after forwarding
+                refreshed_people = company.get("people") or []
+                _pipeline_stats.origami_emails_found = sum(
+                    1 for p in refreshed_people if p.get("email")
+                )
+        else:
+            _pipeline_stats.origami_skipped += 1
+    except Exception as _origami_exc:
+        _log("ORIGAMI", f"Origami error for {name} — {_origami_exc} (pipeline continues)")
+        _pipeline_stats.origami_skipped += 1
+
+    # Step 5: People enrichment waterfall (PDL → Prospeo → ContactOut)
     # The orchestrator handles credit control and stops early when the target
     # number of useful contacts (default 2) is reached.
     # NOTE: run BEFORE scoring so the promoted contact email is counted.
@@ -1062,6 +1116,11 @@ async def run_maps_pipeline(
     _log("PIPELINE", f"Serper fields filled: {ps['serper_fields_filled']}")
     _log("PIPELINE", f"Firecrawl calls: {ps['firecrawl_calls']}")
     _log("PIPELINE", f"Firecrawl fields filled: {ps['firecrawl_fields_filled']}")
+    _log("PIPELINE", f"Origami calls: {ps.get('origami_calls', 0)}")
+    _log("PIPELINE", f"Origami contacts found: {ps.get('origami_contacts_found', 0)}")
+    _log("PIPELINE", f"Origami founders found: {ps.get('origami_founders_found', 0)}")
+    _log("PIPELINE", f"Origami emails found: {ps.get('origami_emails_found', 0)}")
+    _log("PIPELINE", f"Origami skipped: {ps.get('origami_skipped', 0)}")
     _log("PIPELINE", f"Final valid companies: {len(unique)}")
     _log("PIPELINE", f"  emails: {n_email}/{len(unique)}")
     _log("PIPELINE", f"  phones: {n_phone2}/{len(unique)}")
