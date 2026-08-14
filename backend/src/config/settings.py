@@ -36,7 +36,9 @@ class Settings(BaseSettings):
 
     # ── CORS ──────────────────────────────────────────────────────────────────
     # Comma-separated list of allowed origins.
-    # Default covers the Vite dev server on both localhost variants.
+    # Development default covers Vite dev server on localhost variants.
+    # Production: add your deployed frontend origin, e.g.:
+    #   CORS_ORIGINS=https://yourapp.vercel.app,https://www.yourdomain.com
     CORS_ORIGINS: str = (
         "http://localhost:5173,"
         "http://127.0.0.1:5173,"
@@ -47,6 +49,19 @@ class Settings(BaseSettings):
     # ── MongoDB ───────────────────────────────────────────────────────────────
     MONGODB_URI:   str = "mongodb://127.0.0.1:27017/crm"
     MONGO_DB_NAME: str = "crm"
+
+    # ── Public Form Base URL ──────────────────────────────────────────────────
+    # The base URL where the FRONTEND is publicly accessible.
+    # Used to generate shareable public form links that work from any device.
+    #
+    # Development (local Wi-Fi):
+    #   PUBLIC_FORM_BASE_URL=http://YOUR_LOCAL_IP:5173
+    # Production:
+    #   PUBLIC_FORM_BASE_URL=https://YOUR-FRONTEND-DOMAIN.com
+    #
+    # When not set, falls back to the incoming request base_url (backend URL).
+    # That fallback works locally but not in production — always set this in prod.
+    PUBLIC_FORM_BASE_URL: str = ""
 
     # ── Future: Hermes AI ─────────────────────────────────────────────────────
     # HERMES_API_KEY: str = ""

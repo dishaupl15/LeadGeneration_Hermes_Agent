@@ -60,10 +60,13 @@ app = FastAPI(
 )
 
 # ── CORS middleware ───────────────────────────────────────────────────────────
+# Origins are controlled entirely by CORS_ORIGINS in .env.
+# Development default: localhost:5173/5174
+# Production: add your deployed frontend origin to CORS_ORIGINS in backend/.env
+#   e.g. CORS_ORIGINS=https://yourapp.vercel.app,https://www.yourdomain.com
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1):(5173|5174)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -99,6 +102,11 @@ app.include_router(contactout_router)
 # ── Origami people enrichment (standalone — does NOT touch existing pipeline) ──
 # To remove: delete this line + the import above + the origami/ folder
 app.include_router(origami_router)
+
+# ── Reddit lead generation (standalone — does NOT touch Google Maps pipeline) ─
+# To remove: delete backend/reddit/, this block, and the Reddit UI in the frontend
+from reddit.routes import router as reddit_router  # noqa: E402
+app.include_router(reddit_router)
 
 
 # ── Health endpoints ──────────────────────────────────────────────────────────

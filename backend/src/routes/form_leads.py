@@ -46,6 +46,25 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator
 
 from src.config.mongo import get_db
+from src.config.settings import settings as _settings
+
+
+def _public_form_base(request: "Request") -> str:
+    """
+    Return the base URL to use for public form links.
+
+    Priority:
+      1. PUBLIC_FORM_BASE_URL env var — used in production and local-network dev
+      2. request.base_url — fallback for bare localhost dev with no env var set
+
+    The returned string has no trailing slash.
+    """
+    configured = (_settings.PUBLIC_FORM_BASE_URL or "").strip().rstrip("/")
+    if configured:
+        return configured
+    # Fallback: derive from the incoming request (works when frontend and backend
+    # share the same host, or for bare localhost dev without env var)
+    return str(request.base_url).rstrip("/")
 
 # ── collections ───────────────────────────────────────────────────────────────
 FORMS_COLL       = "lead_forms"
@@ -281,7 +300,7 @@ async def create_form(payload: CreateFormRequest, request: Request):
     Sets form_version=1 and initialises version_history snapshot.
     """
     db = get_db()
-    base = str(request.base_url).rstrip("/")
+    base = _public_form_base(request)
     now = _now_iso()
     form_id = _make_form_id(payload.name)
 
@@ -377,7 +396,7 @@ async def get_form(form_id: str, request: Request):
         {"form_id": form_id, "active": True}
     ).sort("platform", 1).to_list(length=50)
 
-    base = str(request.base_url).rstrip("/")
+    base = _public_form_base(request)
     for c in camps:
         c["tracking_url"] = _build_tracking_url(base, form_id, c["platform"], c["campaign_id"])
 
@@ -466,7 +485,7 @@ async def delete_form(form_id: str):
 async def create_campaign(form_id: str, payload: CreateCampaignRequest, request: Request):
     db   = get_db()
     await _get_form_or_404(db, form_id)
-    base = str(request.base_url).rstrip("/")
+    base = _public_form_base(request)
 
     camp_id = _make_campaign_id()
     now = _now_iso()
@@ -491,7 +510,7 @@ async def create_campaign(form_id: str, payload: CreateCampaignRequest, request:
 async def list_campaigns(form_id: str, request: Request):
     db   = get_db()
     await _get_form_or_404(db, form_id)
-    base = str(request.base_url).rstrip("/")
+    base = _public_form_base(request)
     camps = await db[CAMPAIGNS_COLL].find(
         {"form_id": form_id, "active": True}
     ).sort("platform", 1).to_list(length=100)

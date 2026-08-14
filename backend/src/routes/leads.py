@@ -924,7 +924,7 @@ async def get_status_counts(
 
 @router.get(
     "/leads/follow-ups",
-    summary="Get today's and upcoming follow-up leads across all collections",
+    summary="Get today's, overdue, and upcoming follow-up leads across all collections",
     response_model=dict,
     tags=["Leads"],
 )
@@ -932,15 +932,28 @@ async def get_follow_ups(
     category: Optional[str] = Query(None, description="Limit to one category collection"),
 ):
     """
-    Returns two lists:
-      - today:    leads with follow_up_date == today (UTC)
+    Returns three lists:
+      - overdue:  leads with follow_up_date < today AND status != 'not_interested'
+                  AND follow_up_completed != True
+      - today:    leads with follow_up_date == today AND follow_up_completed != True
       - upcoming: leads with follow_up_date > today (next 30 days)
+                  AND follow_up_completed != True
+
+    Excludes leads marked as not_interested.
+    Excludes leads where follow_up_completed == True.
     """
     from datetime import date, timedelta
 
     db       = get_db()
     today    = date.today().isoformat()          # "YYYY-MM-DD"
     in_30    = (date.today() + timedelta(days=30)).isoformat()
+
+    # Base filter: exclude completed follow-ups
+    not_completed = {"$or": [
+        {"follow_up_completed": {"$exists": False}},
+        {"follow_up_completed": False},
+        {"follow_up_completed": None},
+    ]}
 
     # Decide which collections to scan
     if category:
@@ -952,29 +965,63 @@ async def get_follow_ups(
         if not colls:
             colls = [COLLECTION_NAME]
 
-    today_leads:    list[dict] = []
+    # Projection — include founder_name and company_number for richer notifications
+    projection = {
+        "company_name": 1, "founder_name": 1,
+        "email": 1, "company_number": 1, "founder_number": 1,
+        "follow_up_date": 1, "follow_up_completed": 1,
+        "status": 1, "category": 1, "_id": 1,
+    }
+
+    overdue_leads: list[dict] = []
+    today_leads:   list[dict] = []
     upcoming_leads: list[dict] = []
 
     for cname in colls:
         coll = db[cname]
-        cursor = coll.find(
-            {"follow_up_date": {"$gte": today, "$lte": in_30}},
-            {"company_name": 1, "email": 1, "company_number": 1,
-             "follow_up_date": 1, "status": 1, "category": 1, "_id": 1},
+
+        # ── Overdue: date < today, not not_interested, not completed ─────────
+        overdue_cursor = coll.find(
+            {"$and": [
+                {"follow_up_date": {"$nin": [None, ""], "$lt": today}},
+                {"status": {"$ne": "not_interested"}},
+                not_completed,
+            ]},
+            projection,
         ).sort("follow_up_date", 1)
-        async for doc in cursor:
+        async for doc in overdue_cursor:
+            doc["id"] = str(doc.pop("_id"))
+            overdue_leads.append(doc)
+
+        # ── Today + upcoming: date >= today <= today+30, not completed ────────
+        future_cursor = coll.find(
+            {"$and": [
+                {"follow_up_date": {"$gte": today, "$lte": in_30}},
+                {"status": {"$ne": "not_interested"}},
+                not_completed,
+            ]},
+            projection,
+        ).sort("follow_up_date", 1)
+        async for doc in future_cursor:
             doc["id"] = str(doc.pop("_id"))
             if doc.get("follow_up_date") == today:
                 today_leads.append(doc)
             else:
                 upcoming_leads.append(doc)
 
+    # Sort overdue with most overdue first
+    overdue_leads.sort(key=lambda d: d.get("follow_up_date") or "")
+
     return {
-        "success":  True,
-        "today":    today_leads,
-        "upcoming": upcoming_leads,
+        "success":        True,
+        "overdue":        overdue_leads,
+        "today":          today_leads,
+        "upcoming":       upcoming_leads,
+        "overdue_count":  len(overdue_leads),
         "today_count":    len(today_leads),
         "upcoming_count": len(upcoming_leads),
+        # total actionable = overdue + today
+        "due_count":      len(overdue_leads) + len(today_leads),
     }
 
 
@@ -1052,6 +1099,10 @@ class _NoteBody(_StatusBodyBase):
 class _FollowUpBody(_StatusBodyBase):
     follow_up_date: Optional[str] = None   # ISO date string "YYYY-MM-DD" or null to clear
     category:       Optional[str] = None
+
+
+class _FollowUpCompleteBody(_StatusBodyBase):
+    category: Optional[str] = None
 
 
 # The three allowed statuses for the lead status management feature.
@@ -1292,6 +1343,81 @@ async def update_follow_up(lead_id: str, payload: _FollowUpBody):
             doc[ts] = doc[ts].isoformat()
 
     return {"success": True, "follow_up_date": fud, "lead": doc}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATCH /leads/{lead_id}/follow-up-complete
+# Mark a follow-up as completed. Sets follow_up_completed=True and clears
+# the follow_up_date so the lead disappears from Due Today / Overdue.
+# Does NOT delete the lead.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FollowUpCompleteBody(_StatusBodyBase):
+    category: Optional[str] = None
+
+
+@router.patch(
+    "/leads/{lead_id}/follow-up-complete",
+    summary="Mark a follow-up as completed (removes from Due Today / Overdue)",
+    response_model=dict,
+    tags=["Leads"],
+)
+async def complete_follow_up(lead_id: str, payload: _FollowUpCompleteBody):
+    """
+    Sets follow_up_completed = True and clears follow_up_date on the lead.
+    The lead is NOT deleted — it remains in the CRM with its existing status.
+    After this call the lead will no longer appear in the follow-ups lists.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    db  = get_db()
+    now = datetime.now(timezone.utc)
+
+    try:
+        oid = ObjectId(lead_id)
+    except (InvalidId, Exception):
+        oid = None
+
+    coll_name = collection_for_category(payload.category) if payload.category else None
+
+    async def _try_complete(cname: str):
+        coll   = db[cname]
+        flt    = {"_id": oid} if oid else {"id": lead_id}
+        result = await coll.update_one(
+            flt,
+            {"$set": {
+                "follow_up_completed": True,
+                "follow_up_date":      None,
+                "updated_at":          now,
+            }},
+        )
+        if result.matched_count > 0:
+            return await coll.find_one(flt)
+        return None
+
+    doc = None
+    if coll_name:
+        doc = await _try_complete(coll_name)
+    else:
+        doc = await _try_complete(COLLECTION_NAME)
+        if not doc:
+            async for cat in db[CATEGORIES_COLLECTION].find({}, {"collection": 1, "_id": 0}):
+                c = cat.get("collection")
+                if c and c != COLLECTION_NAME:
+                    doc = await _try_complete(c)
+                    if doc:
+                        break
+
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Lead '{lead_id}' not found.")
+
+    doc["id"] = str(doc.pop("_id"))
+    for ts in ("created_at", "updated_at"):
+        if isinstance(doc.get(ts), datetime):
+            doc[ts] = doc[ts].isoformat()
+
+    return {"success": True, "lead_id": lead_id, "lead": doc}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1546,6 +1672,143 @@ async def export_leads_excel(
     buf.seek(0)
 
     filename = f"leads_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /leads/export/excel/all-categories
+# Multi-sheet Excel: one sheet per category that has leads + one summary sheet.
+# Single click downloads every lead across every category collection.
+# MUST be before /leads/{lead_id}
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/leads/export/excel/all-categories",
+    summary="Export ALL leads from ALL categories as a multi-sheet Excel file (one sheet per category)",
+    tags=["Leads"],
+)
+async def export_all_categories_excel():
+    """
+    Iterates every known category collection in MongoDB and produces a single
+    .xlsx file where:
+      - Sheet 1: "All Leads"  — every lead from every category merged together
+      - Sheet 2+: one sheet per category that has at least one lead
+
+    All sheets use the same indigo header style as the single-category export.
+    Column widths are auto-fitted per sheet (capped at 60).
+    The file is streamed directly to the browser so it downloads in one click.
+    """
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+
+    db = get_db()
+
+    # ── Discover categories that actually have data ──────────────────────────
+    # Start from the categories collection (seeded on startup from ALL_CATEGORIES)
+    cat_names: list[str] = []
+    try:
+        cursor = db[CATEGORIES_COLLECTION].find({}, {"name": 1, "_id": 0})
+        docs = await cursor.to_list(length=500)
+        cat_names = [d["name"] for d in docs if d.get("name")]
+    except Exception:
+        pass
+    if not cat_names:
+        cat_names = list(ALL_CATEGORIES)
+
+    # Also consider the legacy root collection
+    all_collections: list[tuple[str, str]] = []  # (display_name, collection_name)
+    for cat in sorted(cat_names):
+        coll_name = collection_for_category(cat)
+        count = await db[coll_name].count_documents({})
+        if count > 0:
+            all_collections.append((cat, coll_name))
+
+    # Legacy root collection (leads without a category slug)
+    root_count = await db[COLLECTION_NAME].count_documents({})
+    if root_count > 0:
+        all_collections.append(("Legacy", COLLECTION_NAME))
+
+    columns = [
+        "Name", "Email", "Phone", "Company", "Designation", "Category",
+        "Platform", "Form", "Status", "Notes", "Follow-up Date", "Created Date",
+    ]
+
+    # ── Shared styling helpers ───────────────────────────────────────────────
+    header_fill   = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
+    header_font   = Font(bold=True, color="FFFFFF", size=11)
+    center_align  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    top_wrap      = Alignment(wrap_text=True, vertical="top")
+
+    def _write_sheet(ws, rows: list[dict]) -> None:
+        """Write header + data rows into a worksheet and auto-fit columns."""
+        for col_idx, col_name in enumerate(columns, start=1):
+            cell = ws.cell(row=1, column=col_idx, value=col_name)
+            cell.fill      = header_fill
+            cell.font      = header_font
+            cell.alignment = center_align
+
+        for row_idx, row in enumerate(rows, start=2):
+            for col_idx, col_name in enumerate(columns, start=1):
+                val  = row.get(col_name, "")
+                cell = ws.cell(row=row_idx, column=col_idx, value=val)
+                cell.alignment = top_wrap
+
+        for col_idx, col_name in enumerate(columns, start=1):
+            col_letter = ws.cell(row=1, column=col_idx).column_letter
+            max_len = max(
+                len(col_name),
+                *(len(str(ws.cell(row=r, column=col_idx).value or ""))
+                  for r in range(2, len(rows) + 2))
+            ) if rows else len(col_name)
+            ws.column_dimensions[col_letter].width = min(max_len + 4, 60)
+
+        if rows:
+            ws.freeze_panes = "A2"
+
+    # ── Build workbook ───────────────────────────────────────────────────────
+    wb = openpyxl.Workbook()
+
+    # Sheet 1: All Leads (merged)
+    ws_all = wb.active
+    ws_all.title = "All Leads"
+
+    all_rows: list[dict] = []
+    cat_rows: dict[str, list[dict]] = {}
+
+    for display_name, coll_name in all_collections:
+        cursor = db[coll_name].find({}).sort("created_at", -1).limit(10000)
+        docs = await cursor.to_list(length=10000)
+        rows: list[dict] = []
+        for doc in docs:
+            doc["id"] = str(doc.pop("_id", ""))
+            rows.append(_doc_to_export_row(doc))
+        cat_rows[display_name] = rows
+        all_rows.extend(rows)
+
+    _write_sheet(ws_all, all_rows)
+
+    # One sheet per category
+    for display_name, _ in all_collections:
+        rows = cat_rows.get(display_name, [])
+        if not rows:
+            continue
+        # Truncate sheet name to 31 chars (Excel limit)
+        sheet_title = display_name[:31]
+        ws_cat = wb.create_sheet(title=sheet_title)
+        _write_sheet(ws_cat, rows)
+
+    # ── Stream response ──────────────────────────────────────────────────────
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = f"all_leads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1923,6 +2186,561 @@ async def bulk_enrich_origami(payload: _BulkOrigamiBody):
         "elapsed_seconds": round(time.monotonic() - t0, 1),
         "results":        results,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Debug endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── REDDIT SECTION  ─ POST /leads/generate-reddit ──────────────────────────
+# To remove the Reddit module:
+#   1. Delete this section (up to the "end REDDIT SECTION" comment)
+#   2. Delete backend/reddit/
+#   3. Remove "from reddit.routes import router as reddit_router" from app/main.py
+#   4. Remove the Reddit source selector from the frontend
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class _RedditGenerateBody(_StatusBodyBase):
+    """Request payload for POST /leads/generate-reddit."""
+    category: str
+    location: str
+    limit:    int = 25
+
+
+@router.post(
+    "/leads/generate-reddit",
+    summary="Generate leads from Reddit posts and save to MongoDB",
+    response_model=dict,
+    tags=["Leads"],
+)
+async def generate_reddit_leads(payload: _RedditGenerateBody):
+    """
+    Full Reddit lead-generation pipeline:
+
+      1. Authenticate with Reddit OAuth2 (application-only — no user login)
+      2. Generate N search queries from category + location
+      3. Fan-out search across all queries
+      4. Extract lead candidates from relevant posts
+      5. Deduplicate against existing leads in MongoDB (by post_id, email, company_name)
+      6. Upsert new leads into the existing leads_{category_slug} collection
+      7. Record a generation_history run (source="reddit") so History panel shows it
+      8. Return summary + inserted leads
+
+    Google Maps pipeline is completely unaffected — this runs independently.
+
+    Error handling:
+      - Reddit auth failure  → returns 200 with success=False + error detail
+      - Rate limited         → returns 200 with success=False + error="rate_limited"
+      - Timeout              → returns 200 with success=False + error="timeout"
+      A Reddit failure never raises 5xx that would break the Google Maps pipeline.
+    """
+    import uuid as _uuid_mod
+
+    # ── Guard: credentials ────────────────────────────────────────────────────
+    try:
+        from reddit.config import is_configured as reddit_configured
+        from reddit.search import run_reddit_search, candidate_to_lead_doc
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Reddit module not available: {exc}",
+        )
+
+    if not reddit_configured():
+        return {
+            "success": False,
+            "error": "no_credentials",
+            "message": "REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET are not set in .env",
+            "category": payload.category,
+            "location": payload.location,
+        }
+
+    t_start = time.monotonic()
+    category = payload.category.strip()
+    location = payload.location.strip()
+    limit    = max(1, min(payload.limit, 100))
+
+    # Generate a unique run ID for the history record
+    run_id = "RUN-RDT-" + _uuid_mod.uuid4().hex[:8].upper()
+
+    _log("REDDIT", f"generate-reddit started — category={category!r} location={location!r} limit={limit} run_id={run_id}")
+
+    # ── Create generation_history run (source="reddit") ───────────────────────
+    db = get_db()
+    now_utc = datetime.now(timezone.utc)
+    history_doc = {
+        "run_id":          run_id,
+        "category":        category,
+        "search_query":    f"{category} {location}",
+        "state":           location,
+        "district":        "",
+        "requested_count": limit,
+        "generated_count": 0,
+        "updated_count":   0,
+        "status":          "running",
+        "source":          "reddit",
+        "started_at":      now_utc.isoformat(),
+        "created_at":      now_utc.isoformat(),
+        "completed_at":    None,
+        "failed_at":       None,
+        "duration_seconds": None,
+        "filters": {"category": category, "location": location, "limit": limit},
+        "lead_ids":        [],
+        "logs": [
+            {
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "level": "INFO",
+                "stage": "init",
+                "message": f"Reddit generation started — category={category!r} location={location!r} limit={limit}",
+            }
+        ],
+        "statistics":      {},
+        "error_message":   None,
+        "pipeline_stats":  None,
+    }
+    try:
+        await db[HISTORY_COLLECTION].insert_one(history_doc)
+    except Exception as hist_exc:
+        _log("REDDIT", f"WARNING: could not create history run: {hist_exc}")
+
+    async def _append_reddit_log(level: str, stage: str, message: str) -> None:
+        entry = {"timestamp": datetime.now().strftime("%H:%M:%S"),
+                 "level": level, "stage": stage, "message": message}
+        try:
+            await db[HISTORY_COLLECTION].update_one(
+                {"run_id": run_id}, {"$push": {"logs": entry}}
+            )
+        except Exception:
+            pass
+
+    # ── Run Reddit search ──────────────────────────────────────────────────────
+    await _append_reddit_log("SEARCH", "reddit", f"Searching Reddit for {category!r} in {location!r}")
+
+    try:
+        search_result = await run_reddit_search(
+            category=category,
+            location=location,
+            limit=limit,
+        )
+    except Exception as exc:
+        error_msg = str(exc)
+        _log("REDDIT", f"Search error: {error_msg}")
+        await _append_reddit_log("ERROR", "reddit", f"Search failed: {error_msg}")
+        now_f = datetime.now(timezone.utc)
+        await db[HISTORY_COLLECTION].update_one(
+            {"run_id": run_id},
+            {"$set": {
+                "status": "failed",
+                "failed_at": now_f.isoformat(),
+                "duration_seconds": round(time.monotonic() - t_start, 1),
+                "error_message": error_msg,
+            }},
+        )
+        return {
+            "success": False,
+            "run_id": run_id,
+            "category": category,
+            "location": location,
+            "error": error_msg,
+            "total_discovered": 0,
+            "total_valid": 0,
+            "total_inserted": 0,
+            "total_duplicates": 0,
+            "total_failed": 0,
+            "leads": [],
+        }
+
+    candidates = search_result.get("candidates", [])
+    posts_discovered = search_result.get("posts_discovered", 0)
+    queries_run = search_result.get("queries_run", 0)
+    search_error = search_result.get("error")
+
+    _log("REDDIT", f"Posts discovered: {posts_discovered} | Valid candidates: {len(candidates)}")
+    await _append_reddit_log("SEARCH", "reddit",
+        f"Posts discovered: {posts_discovered} | Valid candidates: {len(candidates)}")
+
+    if search_error and not candidates:
+        now_f = datetime.now(timezone.utc)
+        await db[HISTORY_COLLECTION].update_one(
+            {"run_id": run_id},
+            {"$set": {
+                "status": "failed",
+                "failed_at": now_f.isoformat(),
+                "duration_seconds": round(time.monotonic() - t_start, 1),
+                "error_message": search_error,
+            }},
+        )
+        return {
+            "success": False,
+            "run_id": run_id,
+            "category": category,
+            "location": location,
+            "error": search_error,
+            "total_discovered": posts_discovered,
+            "total_valid": 0,
+            "total_inserted": 0,
+            "total_duplicates": 0,
+            "total_failed": 0,
+            "leads": [],
+        }
+
+    # ── MongoDB deduplication & upsert ────────────────────────────────────────
+    coll_name = collection_for_category(category)
+    coll = db[coll_name]
+
+    # Ensure indexes (non-fatal)
+    try:
+        await ensure_lead_indexes(db, category)
+    except Exception:
+        pass
+
+    # Register category
+    try:
+        await db[CATEGORIES_COLLECTION].update_one(
+            {"name": category},
+            {"$set": {"name": category, "collection": coll_name}},
+            upsert=True,
+        )
+    except Exception:
+        pass
+
+    # Collect dedup keys from candidates
+    candidate_post_ids    = [c.post_id for c in candidates if c.post_id]
+    candidate_emails      = [c.email for c in candidates if c.email]
+    candidate_companies   = [
+        (c.company_name or "").lower().strip()
+        for c in candidates if c.company_name
+    ]
+
+    # Existing post_ids (Reddit-specific dedup)
+    existing_post_ids: set[str] = set()
+    if candidate_post_ids:
+        async for doc in coll.find(
+            {"post_id": {"$in": candidate_post_ids}},
+            {"post_id": 1, "_id": 0},
+        ):
+            pid = doc.get("post_id")
+            if pid:
+                existing_post_ids.add(pid)
+
+    # Existing emails
+    existing_emails: set[str] = set()
+    if candidate_emails:
+        async for doc in coll.find(
+            {"email": {"$in": candidate_emails}},
+            {"email": 1, "_id": 0},
+        ):
+            e = (doc.get("email") or "").lower().strip()
+            if e:
+                existing_emails.add(e)
+
+    # Existing company names (only when no email/post_id match)
+    existing_companies: set[str] = set()
+    if candidate_companies:
+        async for doc in coll.find(
+            {"company_name": {"$regex": "|".join(
+                c for c in candidate_companies if c
+            ), "$options": "i"}} if candidate_companies else {},
+            {"company_name": 1, "_id": 0},
+        ):
+            n = (doc.get("company_name") or "").lower().strip()
+            if n:
+                existing_companies.add(n)
+
+    _log("REDDIT",
+         f"DB dedup check — existing post_ids={len(existing_post_ids)} "
+         f"emails={len(existing_emails)} companies={len(existing_companies)}")
+    await _append_reddit_log("FILTER", "dedup",
+        f"DB dedup: {len(existing_post_ids)} existing post IDs, "
+        f"{len(existing_emails)} existing emails")
+
+    # ── Upsert loop ───────────────────────────────────────────────────────────
+    inserted_count  = 0
+    duplicate_count = 0
+    failed_count    = 0
+    inserted_ids: list[str] = []
+    now_ins = datetime.now(timezone.utc)
+
+    for candidate in candidates:
+        # Check duplicates
+        post_dup    = candidate.post_id in existing_post_ids
+        email_dup   = bool(candidate.email and candidate.email.lower() in existing_emails)
+        company_dup = bool(
+            candidate.company_name
+            and candidate.company_name.lower().strip() in existing_companies
+            and not candidate.email  # only name-dedup when no email
+        )
+
+        if post_dup or email_dup or company_dup:
+            duplicate_count += 1
+            continue
+
+        # Build lead document
+        try:
+            lead_doc = candidate_to_lead_doc(candidate, category, run_id)
+        except Exception as conv_exc:
+            _log("REDDIT", f"Conversion error for post {candidate.post_id}: {conv_exc}")
+            failed_count += 1
+            continue
+
+        # Upsert key: post_id is the most reliable Reddit dedup key
+        filter_key: dict
+        if candidate.post_id:
+            filter_key = {"post_id": candidate.post_id}
+        elif candidate.email:
+            filter_key = {"email": candidate.email}
+        else:
+            filter_key = {"company_name": lead_doc["company_name"]}
+
+        set_on_insert = {
+            "created_at":          now_ins,
+            "generation_run_id":   run_id,
+            "status":              "new",
+            "status_updated_at":   now_ins.isoformat(),
+            "notes":               [],
+            "follow_up_date":      None,
+            "contacts":            [],
+            "people":              [],
+            "origami_enriched":    False,
+        }
+
+        try:
+            result = await coll.update_one(
+                filter_key,
+                {
+                    "$set": lead_doc,
+                    "$setOnInsert": set_on_insert,
+                },
+                upsert=True,
+            )
+            if result.upserted_id:
+                inserted_count += 1
+                inserted_ids.append(str(result.upserted_id))
+                # Track for next iteration dedup
+                if candidate.post_id:
+                    existing_post_ids.add(candidate.post_id)
+                if candidate.email:
+                    existing_emails.add(candidate.email.lower())
+            else:
+                duplicate_count += 1  # already existed (race or filter_key matched)
+        except Exception as db_exc:
+            _log("REDDIT", f"DB upsert error for post {candidate.post_id}: {db_exc}")
+            failed_count += 1
+
+    elapsed_upsert = round(time.monotonic() - t_start, 1)
+    _log("REDDIT",
+         f"Upserts complete — inserted={inserted_count} duplicates={duplicate_count} "
+         f"failed={failed_count} elapsed={elapsed_upsert}s")
+    await _append_reddit_log("COMPLETE", "pipeline",
+        f"Upserts done in {elapsed_upsert}s — "
+        f"inserted={inserted_count} duplicates={duplicate_count} failed={failed_count}")
+
+    # ── Fetch inserted leads from MongoDB ─────────────────────────────────────
+    leads_out: list[dict] = []
+    raw_oids: list = []
+    if inserted_ids:
+        from bson import ObjectId
+        from bson.errors import InvalidId
+        for sid in inserted_ids:
+            try:
+                raw_oids.append(ObjectId(sid))
+            except (InvalidId, Exception):
+                pass
+        if raw_oids:
+            cursor = coll.find({"_id": {"$in": raw_oids}}).sort("created_at", -1)
+            db_docs = await cursor.to_list(length=len(raw_oids) + 5)
+            for doc in db_docs:
+                doc["id"] = str(doc.pop("_id"))
+                for ts_f in ("created_at", "updated_at"):
+                    if isinstance(doc.get(ts_f), datetime):
+                        doc[ts_f] = doc[ts_f].isoformat()
+                leads_out.append(doc)
+
+    # ── People enrichment waterfall (PDL → Prospeo → ContactOut → Hunter) ────
+    # Reuses the EXACT same orchestrator used by the Google Maps pipeline.
+    # Runs only on newly inserted leads; enrichment failures are non-fatal.
+    enrichment_stats: dict = {}
+    if leads_out:
+        await _append_reddit_log("ENRICH", "people_enrichment",
+            f"Starting people enrichment for {len(leads_out)} new Reddit leads")
+        _log("REDDIT", f"Starting people enrichment for {len(leads_out)} leads")
+        try:
+            from reddit.enrichment import enrich_reddit_leads_batch
+            leads_out, enrichment_stats = await enrich_reddit_leads_batch(
+                leads_out,
+                max_concurrency=3,
+                per_lead_timeout=60.0,
+                log=lambda msg: _log("REDDIT_ENRICH", msg),
+            )
+            _log("REDDIT", (
+                f"Enrichment complete — "
+                f"enriched={enrichment_stats.get('enriched', 0)} "
+                f"contacts={enrichment_stats.get('contacts_found', 0)} "
+                f"emails={enrichment_stats.get('emails_found', 0)} "
+                f"elapsed={enrichment_stats.get('elapsed_seconds', 0)}s"
+            ))
+            await _append_reddit_log("ENRICH", "people_enrichment",
+                f"Enrichment done — "
+                f"enriched={enrichment_stats.get('enriched', 0)} "
+                f"contacts={enrichment_stats.get('contacts_found', 0)} "
+                f"emails={enrichment_stats.get('emails_found', 0)}")
+        except Exception as enrich_exc:
+            # Enrichment failure is completely non-fatal — leads are still returned
+            _log("REDDIT", f"WARNING: enrichment step error (non-fatal): {enrich_exc}")
+            await _append_reddit_log("ENRICH", "people_enrichment",
+                f"Enrichment step error (non-fatal): {enrich_exc}")
+
+        # ── Write enrichment results back to MongoDB ──────────────────────────
+        # Only update fields that enrichment actually filled in.
+        # Preserves all existing Reddit source fields.
+        if leads_out:
+            now_enrich = datetime.now(timezone.utc)
+            for enriched_lead in leads_out:
+                lead_id_str = enriched_lead.get("id") or ""
+                if not lead_id_str:
+                    continue
+                try:
+                    from bson import ObjectId as _ObjId
+                    from bson.errors import InvalidId as _InvId
+                    lead_oid = _ObjId(lead_id_str)
+                except Exception:
+                    continue
+
+                # Build $set with only non-empty enrichment fields
+                enrich_set: dict = {"updated_at": now_enrich}
+
+                contacts = enriched_lead.get("contacts") or []
+                if contacts:
+                    enrich_set["contacts"] = contacts
+
+                # Only promote email when enrichment added one
+                enr_email = enriched_lead.get("email")
+                if enr_email:
+                    enrich_set["email"] = enr_email
+                enr_emails = enriched_lead.get("emails") or []
+                if enr_emails:
+                    enrich_set["emails"] = enr_emails
+
+                enr_phone = enriched_lead.get("company_number")
+                if enr_phone:
+                    enrich_set["company_number"] = enr_phone
+                enr_phones = enriched_lead.get("phones") or []
+                if enr_phones:
+                    enrich_set["phones"] = enr_phones
+
+                enr_founder = enriched_lead.get("founder_name")
+                if enr_founder:
+                    enrich_set["founder_name"] = enr_founder
+                enr_founder_num = enriched_lead.get("founder_number")
+                if enr_founder_num:
+                    enrich_set["founder_number"] = enr_founder_num
+
+                enr_conf = enriched_lead.get("confidence")
+                if enr_conf is not None:
+                    enrich_set["confidence"] = enr_conf
+
+                enr_fv = enriched_lead.get("_field_verification")
+                if enr_fv:
+                    enrich_set["_field_verification"] = enr_fv
+
+                pe_stats = enriched_lead.get("people_enrichment_stats")
+                if pe_stats:
+                    enrich_set["people_enrichment_stats"] = pe_stats
+
+                # Ensure Reddit source fields are never wiped
+                enrich_set["source"]          = "reddit"
+                enrich_set["platform"]        = "reddit"
+                enrich_set["research_source"] = "reddit"
+
+                try:
+                    await coll.update_one(
+                        {"_id": lead_oid},
+                        {"$set": enrich_set},
+                    )
+                except Exception as upd_exc:
+                    _log("REDDIT", f"WARNING: enrichment write-back failed for {lead_id_str}: {upd_exc}")
+
+    # Update lead_count in categories
+    try:
+        total_in_coll = await coll.count_documents({})
+        await db[CATEGORIES_COLLECTION].update_one(
+            {"name": category},
+            {"$set": {"lead_count": total_in_coll}},
+        )
+    except Exception:
+        pass
+
+    # ── Complete the history run ───────────────────────────────────────────────
+    elapsed = round(time.monotonic() - t_start, 1)
+    run_stats = {
+        "posts_discovered":  posts_discovered,
+        "candidates_found":  len(candidates),
+        "leads_generated":   inserted_count,
+        "duplicates":        duplicate_count,
+        "failed":            failed_count,
+        "queries_run":       queries_run,
+        "elapsed_seconds":   elapsed,
+        # Enrichment stats
+        "enriched":          enrichment_stats.get("enriched", 0),
+        "contacts_found":    enrichment_stats.get("contacts_found", 0),
+        "emails_found":      enrichment_stats.get("emails_found", 0),
+    }
+    now_done = datetime.now(timezone.utc)
+    try:
+        await db[HISTORY_COLLECTION].update_one(
+            {"run_id": run_id},
+            {"$set": {
+                "status":          "completed",
+                "generated_count": inserted_count,
+                "updated_count":   duplicate_count,
+                "completed_at":    now_done.isoformat(),
+                "duration_seconds": elapsed,
+                "lead_ids":        inserted_ids,
+                "statistics":      run_stats,
+                "pipeline_stats":  {
+                    "reddit_posts_discovered": posts_discovered,
+                    "reddit_queries_run":      queries_run,
+                    "reddit_candidates":       len(candidates),
+                    "elapsed_seconds":         elapsed,
+                    # People enrichment stats
+                    "people_enriched":         enrichment_stats.get("enriched", 0),
+                    "people_contacts_found":   enrichment_stats.get("contacts_found", 0),
+                    "people_emails_found":     enrichment_stats.get("emails_found", 0),
+                    "people_elapsed_seconds":  enrichment_stats.get("elapsed_seconds", 0.0),
+                },
+            }},
+        )
+    except Exception as hist_upd_exc:
+        _log("REDDIT", f"WARNING: could not complete history run: {hist_upd_exc}")
+
+    return {
+        "success":          True,
+        "run_id":           run_id,
+        "category":         category,
+        "location":         location,
+        "total_discovered": posts_discovered,
+        "total_valid":      len(candidates),
+        "total_inserted":   inserted_count,
+        "total_duplicates": duplicate_count,
+        "total_failed":     failed_count,
+        "elapsed_seconds":  elapsed,
+        "leads":            leads_out,
+        "pipeline_stats": {
+            "reddit_posts_discovered": posts_discovered,
+            "reddit_queries_run":      queries_run,
+            "reddit_candidates":       len(candidates),
+            "elapsed_seconds":         elapsed,
+            # People enrichment stats
+            "people_enriched":         enrichment_stats.get("enriched", 0),
+            "people_contacts_found":   enrichment_stats.get("contacts_found", 0),
+            "people_emails_found":     enrichment_stats.get("emails_found", 0),
+            "people_elapsed_seconds":  enrichment_stats.get("elapsed_seconds", 0.0),
+        },
+    }
+
+
+# ── end REDDIT SECTION ────────────────────────────────────────────────────────
 
 
 # ─────────────────────────────────────────────────────────────────────────────

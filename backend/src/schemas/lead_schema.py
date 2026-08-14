@@ -310,6 +310,12 @@ class MongoLeadDoc(BaseModel):
         description="Scheduled follow-up date (YYYY-MM-DD) or null",
     )
 
+    # ── Follow-up completed flag ────────────────────────────────────────────
+    follow_up_completed: Optional[bool] = Field(
+        default=None,
+        description="True when the follow-up has been marked as done",
+    )
+
     # ── Field-level evidence model ─────────────────────────────────────────
     # Internal waterfall metadata: which provider contributed each field.
     # Stored in MongoDB so audit tools can show provider breakdown.
