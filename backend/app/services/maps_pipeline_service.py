@@ -85,6 +85,11 @@ class _PipelineStats:
         self.contactout_contacts        = 0
         self.people_target_reached      = 0
         self.people_auth_failures       = 0
+        self.hunter_calls      = 0
+        self.hunter_success    = 0
+        self.hunter_no_result  = 0
+        self.hunter_failed     = 0
+        self.hunter_contacts   = 0
         # Legacy PDL-direct fields (kept for backward compat — now populated via orchestrator)
         self.pdl_companies_searched  = 0
         self.pdl_contacts_found      = 0
@@ -127,6 +132,12 @@ def get_pipeline_stats() -> dict:
         "contactout_contacts":        s.contactout_contacts,
         "people_target_reached":      s.people_target_reached,
         "people_auth_failures":       s.people_auth_failures,
+        # Hunter.io fallback stats
+        "hunter_calls":               s.hunter_calls,
+        "hunter_success":             s.hunter_success,
+        "hunter_no_result":           s.hunter_no_result,
+        "hunter_failed":              s.hunter_failed,
+        "hunter_contacts":            s.hunter_contacts,
         # Legacy PDL direct stats (kept for backward compat — now populated via orchestrator)
         "pdl_companies_searched":     s.pdl_companies_searched,
         "pdl_contacts_found":         s.pdl_contacts_found,
@@ -883,6 +894,20 @@ async def _enrich_via_people_orchestrator(company: dict) -> dict:
         if co_ps.error == "auth_failed":
             _pipeline_stats.people_auth_failures += 1
 
+    # Hunter fallback stats
+    hunter_ps = result.provider_stats.get("hunter")
+    if hunter_ps and hunter_ps.called:
+        _pipeline_stats.hunter_calls    += hunter_ps.api_calls or 1
+        _pipeline_stats.hunter_contacts += hunter_ps.contacts_found
+        if hunter_ps.error in ("auth_failed", "no_credits", "rate_limited") or (
+            hunter_ps.error and not hunter_ps.error.startswith("no_result")
+        ):
+            _pipeline_stats.hunter_failed += 1
+        elif hunter_ps.contacts_found == 0:
+            _pipeline_stats.hunter_no_result += 1
+        else:
+            _pipeline_stats.hunter_success += 1
+
     if result.contacts_found == 0:
         _log("PEOPLE_ENRICH", f"{company_name!r} — No useful contacts found")
     else:
@@ -1144,7 +1169,23 @@ async def run_maps_pipeline(
     _log("PEOPLE_ENRICH", f"  Prospeo calls:             {ps['prospeo_calls']}")
     _log("PEOPLE_ENRICH", f"  ContactOut calls:          {ps['contactout_calls']}")
     _log("PEOPLE_ENRICH", f"  auth failures:             {ps['people_auth_failures']}")
+    _log("PEOPLE_ENRICH", (
+        f"  Hunter: calls={ps['hunter_calls']} "
+        f"success={ps['hunter_success']} "
+        f"no_result={ps['hunter_no_result']} "
+        f"failed={ps['hunter_failed']} "
+        f"contacts={ps['hunter_contacts']}"
+    ))
     _log("PIPELINE", f"Total elapsed: {elapsed}s")
+
+    # ── API Contribution Report ───────────────────────────────────────────────
+    # Printed immediately after the pipeline summary. READ-ONLY — does not
+    # modify any company dict or pipeline state. API keys are never logged.
+    try:
+        from app.services.api_contribution_logger import print_contribution_report
+        print_contribution_report(unique, ps)
+    except Exception as _cr_exc:
+        _log("PIPELINE", f"API contribution report error (non-fatal): {_cr_exc}")
 
     return {
         "companies":      unique,

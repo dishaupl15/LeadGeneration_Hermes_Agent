@@ -168,25 +168,60 @@ async def _ensure_history_indexes(db: motor.motor_asyncio.AsyncIOMotorDatabase) 
 async def connect_db() -> None:
     """
     Open the Motor connection.  Call this once at application startup.
-    Prints a confirmation line when the ping succeeds.
-    Also seeds the categories collection with all known category names.
+    Reads MONGODB_URI from the environment:
+      - MongoDB Atlas:  mongodb+srv://user:pass@cluster0.xxxxx.mongodb.net/crm
+
+    SECURITY: The connection URI (including any password) is NEVER logged.
+    Only a safe label ("Atlas") is printed.
     """
     global _client, _db
 
-    uri = os.getenv("MONGODB_URI", "mongodb://127.0.0.1:27017/crm")
+    uri = os.getenv("MONGODB_URI", "")
+
+    if not uri:
+        print(
+            "[MONGODB] ERROR: MONGODB_URI is not set in the environment. "
+            "Add MONGODB_URI=mongodb+srv://... to backend/.env and restart."
+        )
+        raise RuntimeError(
+            "MONGODB_URI environment variable is not set. "
+            "Configure your MongoDB Atlas URI in backend/.env."
+        )
+
+    # Determine a safe, human-readable label — never log the URI itself
+    if uri.startswith("mongodb+srv://"):
+        _label = "MongoDB Atlas"
+    elif "127.0.0.1" in uri or "localhost" in uri:
+        _label = "Local MongoDB (localhost)"
+        print(
+            "[MONGODB] WARNING: MONGODB_URI points to localhost. "
+            "For production use, set a MongoDB Atlas URI."
+        )
+    else:
+        _label = "MongoDB (custom URI)"
+
+    print(f"[MONGODB] Connecting to {_label}...")
 
     try:
-        _client = motor.motor_asyncio.AsyncIOMotorClient(uri, serverSelectionTimeoutMS=5000)
+        _client = motor.motor_asyncio.AsyncIOMotorClient(
+            uri,
+            serverSelectionTimeoutMS=10_000,   # 10 s — Atlas needs more than local
+            connectTimeoutMS=10_000,
+            socketTimeoutMS=30_000,
+            tls=uri.startswith("mongodb+srv://"),  # TLS required for Atlas
+        )
         # Force an actual network round-trip to confirm reachability
         await _client.admin.command("ping")
         _db = _client[DB_NAME]
-        print("✅ Connected to MongoDB")
+        print(f"[MONGODB] Connection successful — database: '{DB_NAME}' on {_label}")
         # Seed category names into the 'categories' collection
         await _seed_categories(_db)
         # Ensure indexes on generation_history collection
         await _ensure_history_indexes(_db)
     except Exception as exc:
-        print(f"❌ MongoDB connection failed: {exc}")
+        # Log only the exception type and message — never the URI or credentials
+        safe_msg = str(exc).split("@")[-1] if "@" in str(exc) else str(exc)
+        print(f"[MONGODB] Connection failed: {type(exc).__name__}: {safe_msg}")
         raise
 
 

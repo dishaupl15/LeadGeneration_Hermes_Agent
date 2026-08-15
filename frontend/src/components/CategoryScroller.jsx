@@ -19,9 +19,9 @@ export default function CategoryScroller({ selectedCategory, onSelectCategory })
   }
 
   return (
-    <div className="crm-card p-4 mb-6">
+    <div className="crm-card p-4">
       {/* Section label */}
-      <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-3 px-1">
+      <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2.5 px-1">
         Select Industry
       </p>
 

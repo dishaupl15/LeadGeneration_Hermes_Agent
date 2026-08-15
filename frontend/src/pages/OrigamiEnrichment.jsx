@@ -23,6 +23,8 @@ import {
   testOrigamiAuth,
   origamiSearchContacts,
   getOrigamiStats,
+  bulkEnrichOrigami,
+  getLeads,
 } from '../services/api'
 
 // ── Tier badge ─────────────────────────────────────────────────────────────────
@@ -124,6 +126,13 @@ export default function OrigamiEnrichment() {
   const [statsLoading, setStatsLoading] = useState(false)
   const [statsError,   setStatsError]   = useState('')
 
+  // ── Bulk enrich state ─────────────────────────────────────────────────────────
+  const [bulkCategory,   setBulkCategory]   = useState('')
+  const [bulkRunning,    setBulkRunning]     = useState(false)
+  const [bulkResult,     setBulkResult]      = useState(null)
+  const [bulkError,      setBulkError]       = useState('')
+  const [bulkLeadCount,  setBulkLeadCount]   = useState(null)   // how many leads in that category
+
   // ── Load health on mount ─────────────────────────────────────────────────────
   useEffect(() => {
     setHealthLoading(true)
@@ -191,6 +200,39 @@ export default function OrigamiEnrichment() {
     setLocation('')
     setCategory('')
   }
+
+  // ── Fetch lead count when category changes ────────────────────────────────
+  useEffect(() => {
+    setBulkLeadCount(null)
+    if (!bulkCategory) return
+    getLeads({ category: bulkCategory, per_page: 1 })
+      .then(res => setBulkLeadCount(res.total ?? res.leads?.length ?? null))
+      .catch(() => setBulkLeadCount(null))
+  }, [bulkCategory])
+
+  // ── Bulk enrich handler ───────────────────────────────────────────────────
+  const handleBulkEnrich = useCallback(async () => {
+    setBulkRunning(true)
+    setBulkResult(null)
+    setBulkError('')
+    try {
+      // Fetch up to 100 lead IDs for the selected category
+      const res = await getLeads({ category: bulkCategory || undefined, per_page: 100 })
+      const leads = res.leads ?? res.data ?? []
+      const ids   = leads.map(l => l.id ?? l._id).filter(Boolean)
+      if (ids.length === 0) {
+        setBulkError('No leads found for this category.')
+        return
+      }
+      const result = await bulkEnrichOrigami(ids, bulkCategory || null, 3)
+      setBulkResult(result)
+      loadStats()   // refresh coverage stats after enrichment
+    } catch (err) {
+      setBulkError(err.message || 'Bulk enrichment failed.')
+    } finally {
+      setBulkRunning(false)
+    }
+  }, [bulkCategory, loadStats])
 
   // ── Render ────────────────────────────────────────────────────────────────────
   return (

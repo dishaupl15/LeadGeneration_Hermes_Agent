@@ -23,6 +23,11 @@ backend/.env.*
 backend/src/**/__pycache__/
 backend/app/**/__pycache__/
 
+# Frontend env (contains local IP — machine-specific, not for version control)
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
 # leadgen tool (external dependency — not part of this repo)
 LeadGeneration/
 

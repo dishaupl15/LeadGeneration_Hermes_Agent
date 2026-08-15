@@ -18,8 +18,8 @@ export default function RefreshLeadsButton({ isRefreshing, isLoading, onClick })
       aria-label="Refresh leads from database"
       title="Reload all leads directly from MongoDB — no AI, no scraping"
       className={`
-        inline-flex items-center gap-2 px-4 py-2.5 rounded-xl
-        border border-slate-200 bg-white text-slate-600 text-sm font-medium
+        inline-flex items-center gap-1.5 h-8 px-3 rounded-lg whitespace-nowrap
+        border border-slate-200 bg-white text-slate-600 text-xs font-semibold
         shadow-sm hover:bg-slate-50 hover:border-slate-300 hover:text-slate-800
         transition-all duration-150
         disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none
@@ -27,7 +27,7 @@ export default function RefreshLeadsButton({ isRefreshing, isLoading, onClick })
     >
       {/* Rotate icon while refreshing */}
       <svg
-        className={`w-4 h-4 flex-shrink-0 ${isRefreshing ? 'animate-spin' : ''}`}
+        className={`w-3.5 h-3.5 flex-shrink-0 ${isRefreshing ? 'animate-spin' : ''}`}
         fill="none"
         stroke="currentColor"
         viewBox="0 0 24 24"
@@ -40,12 +40,12 @@ export default function RefreshLeadsButton({ isRefreshing, isLoading, onClick })
           d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
         />
       </svg>
-      <span>{isRefreshing ? 'Refreshing…' : 'Refresh Leads'}</span>
+      <span className="hidden sm:inline">{isRefreshing ? 'Refreshing…' : 'Refresh'}</span>
 
       {/* DB badge — visible when idle */}
       {!isRefreshing && (
         <span className="
-          hidden sm:inline-flex items-center gap-1
+          inline-flex items-center gap-1
           px-1.5 py-0.5 rounded text-[10px] font-semibold
           bg-emerald-50 text-emerald-600 border border-emerald-200
         ">

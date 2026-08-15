@@ -47,7 +47,13 @@ class Settings(BaseSettings):
     )
 
     # ── MongoDB ───────────────────────────────────────────────────────────────
-    MONGODB_URI:   str = "mongodb://127.0.0.1:27017/crm"
+    # Set MONGODB_URI in .env to your MongoDB Atlas connection string:
+    #   MONGODB_URI=mongodb+srv://<user>:<pass>@cluster0.iuq2qov.mongodb.net/crm?appName=Cluster0
+    #
+    # The default below is intentionally empty so the app fails fast if MONGODB_URI
+    # is not set, rather than silently connecting to a local instance.
+    # src/config/mongo.py handles the actual connection using os.getenv("MONGODB_URI").
+    MONGODB_URI:   str = ""
     MONGO_DB_NAME: str = "crm"
 
     # ── Public Form Base URL ──────────────────────────────────────────────────

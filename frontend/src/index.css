@@ -52,6 +52,13 @@
 /* ── Custom component styles ────────────────────────────────────── */
 @layer components {
 
+  /* Nav button — shared token for all header action buttons */
+  .nav-btn {
+    @apply inline-flex items-center gap-1.5 h-8 px-3 rounded-lg whitespace-nowrap
+           border text-xs font-semibold shadow-sm transition-all duration-150
+           focus:outline-none focus:ring-2;
+  }
+
   /* Card container */
   .crm-card {
     @apply bg-white rounded-2xl shadow-sm border border-slate-200;
@@ -69,7 +76,7 @@
 
   /* Input base */
   .crm-input {
-    @apply w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm
+    @apply w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm
            text-slate-900 placeholder-slate-400
            focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500
            transition-all duration-150 shadow-sm;

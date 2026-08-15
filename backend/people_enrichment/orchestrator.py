@@ -337,13 +337,11 @@ async def _call_hunter(
     Call Hunter.io /domain-search as a fallback when PDL+Prospeo+ContactOut
     return zero emails.
 
-    Hunter returns individual contacts (first_name, last_name, title, email)
-    for a company domain — ideal for small/mid Indian companies.
-    Each contact is converted to the standard raw dict format.
+    Delegates to the isolated hunter/ module (hunter/people_search.py).
     Skipped silently when HUNTER_API_KEY is not set.
     """
     stats = ProviderStats(called=True)
-    raw: list[dict] = []
+    raw:   list[dict] = []
 
     if not domain:
         stats.called         = False
@@ -351,94 +349,54 @@ async def _call_hunter(
         return raw, stats
 
     try:
-        import os
-        hunter_key = os.getenv("HUNTER_API_KEY", "").strip()
-        if not hunter_key:
+        from hunter.config import is_configured as _hunter_ok
+        if not _hunter_ok():
             stats.called         = False
             stats.skipped_reason = "not_configured"
-            _log("Hunter.io skipped — HUNTER_API_KEY not set")
+            _log("Hunter skipped — HUNTER_API_KEY not set")
             return raw, stats
 
-        import httpx
-        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
-            resp = await client.get(
-                "https://api.hunter.io/v2/domain-search",
-                params={"domain": domain, "limit": 10, "api_key": hunter_key},
-            )
-
-        stats.api_calls = 1
-
-        if resp.status_code == 401:
-            stats.error = "auth_failed"
-            _log("Hunter.io auth failed (401)")
-            return raw, stats
-        if resp.status_code == 402:
-            stats.error = "no_credits"
-            _log("Hunter.io plan limit (402)")
-            return raw, stats
-        if resp.status_code == 429:
-            stats.error = "rate_limited"
-            _log("Hunter.io rate limited (429)")
-            return raw, stats
-        if resp.status_code != 200:
-            stats.error = f"http_{resp.status_code}"
-            _log(f"Hunter.io error HTTP {resp.status_code}")
-            return raw, stats
-
-        data    = resp.json()
-        entries = (data.get("data") or {}).get("emails") or []
-
-        _JUNK_LOCALS = {"noreply","no-reply","donotreply","webmaster","abuse",
-                        "postmaster","spam","admin","test","example",
-                        "billing","crm-support","freshbots-support","dpo",
-                        "ir","newsletter","unsubscribe","bounce","mailer"}
-        _PERSONAL_DOMS = {"gmail.com","yahoo.com","hotmail.com","outlook.com","icloud.com"}
-        # Hunter "type" values we keep — generic emails without a person name are skipped
-        _PERSONAL_TYPES = {"personal"}  # types that can have a named person
-        # We also keep generic only if the entry has a real first+last name
-
-        for entry in entries:
-            addr = (entry.get("value") or "").strip().lower()
-            if not addr or "@" not in addr:
-                continue
-            local, _, edom = addr.partition("@")
-            if edom in _PERSONAL_DOMS or edom == "example.com":
-                continue
-            if local in _JUNK_LOCALS:
-                continue
-            # Only accept emails at the company domain
-            if not (edom == domain or edom.endswith("." + domain)):
-                continue
-
-            first = (entry.get("first_name") or "").strip()
-            last  = (entry.get("last_name")  or "").strip()
-            name  = f"{first} {last}".strip() or None
-            title = (entry.get("position") or entry.get("type") or "").strip() or None
-            etype = (entry.get("type") or "").strip().lower()
-            conf  = 0.55 if entry.get("confidence", 0) >= 70 else 0.40
-
-            # Skip generic/catch-all emails with no person name
-            if not name and etype not in ("personal",):
-                continue
-
-            raw.append({
-                "name":         name,
-                "title":        title,
-                "email":        addr,
-                "phone":        None,
-                "linkedin_url": None,
-                "sources":      ["hunter"],
-                "confidence":   conf,
-            })
-
-        stats.contacts_found = len(raw)
-        stats.emails_found   = len(raw)   # every Hunter contact has an email
-        _log(f"Hunter.io: domain={domain!r}  contacts={len(raw)}")
-
+        from hunter.people_search import search_contacts as _hunter_search
+        result = await _hunter_search(company_name=company_name, domain=domain)
     except Exception as exc:
         stats.error = f"{type(exc).__name__}: {exc}"
-        _log(f"Hunter.io exception: {stats.error}")
+        _log(f"Hunter exception: {stats.error}")
+        return raw, stats
 
+    stats.api_calls      = result.calls
+    stats.contacts_found = result.contacts_found
+    stats.emails_found   = result.emails_found
+
+    if result.error == "auth_failed":
+        stats.error = "auth_failed"
+        return raw, stats
+    if result.error == "no_credits":
+        stats.error = "no_credits"
+        return raw, stats
+    if result.error == "rate_limited":
+        stats.error = "rate_limited"
+        return raw, stats
+    if result.error and result.error not in ("no_result",):
+        stats.error = result.error
+
+    # Convert HunterContact → orchestrator raw dict format
+    for c in result.contacts:
+        email = c.email or ""
+        if not email:
+            continue
+        raw.append({
+            "name":         c.name,
+            "title":        c.title,
+            "email":        email,
+            "phone":        None,
+            "linkedin_url": None,
+            "sources":      ["hunter"],
+            "confidence":   c.confidence,
+        })
+
+    stats.contacts_found = len(raw)
+    stats.emails_found   = len(raw)
+    _log(f"Hunter: domain={domain!r} contacts={len(raw)}")
     return raw, stats
 
 

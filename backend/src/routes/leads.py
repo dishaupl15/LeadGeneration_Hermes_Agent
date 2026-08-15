@@ -713,6 +713,16 @@ async def generate_leads(payload: GenerateLeadsRequest):
         f"firecrawl_calls={ps.get('firecrawl_calls', 0)}"
     ))
 
+    # ── API Contribution Report ───────────────────────────────────────────────
+    # Prints a detailed per-API breakdown to backend logs after every run.
+    # READ-ONLY — never modifies pipeline data or lead dicts.
+    # API keys are NEVER read or logged here.
+    try:
+        from app.services.api_contribution_logger import print_contribution_report
+        print_contribution_report(unique, ps)
+    except Exception as _cr_exc:
+        _log("LEADS", f"API contribution report error (non-fatal): {_cr_exc}")
+
     final_pipeline_stats = {
         "google_maps_discovered":      ps.get("google_maps_discovered", 0),
         "google_maps_duplicates":      ps.get("google_maps_duplicates", 0),
@@ -799,6 +809,161 @@ async def generate_leads(payload: GenerateLeadsRequest):
         leads=leads_out,
         pipeline_stats=final_pipeline_stats,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /leads/today
+# Must be declared BEFORE GET /leads/{lead_id} to avoid path-param conflict.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/leads/today",
+    summary="Today's generated leads across ALL category collections",
+    response_model=dict,
+    tags=["Leads"],
+)
+async def get_today_leads(
+    category: Optional[str] = Query(None, description="Limit to one category collection (omit = all categories)"),
+    per_page: int            = Query(100, ge=1, le=500, description="Max leads to return per category"),
+):
+    """
+    Return all leads whose created_at falls within today (UTC midnight → 23:59:59).
+
+    When no category is supplied this endpoint fans out across EVERY known
+    category collection (leads_construction, leads_real_estate, …) plus the
+    legacy 'leads' collection, merges the results, and returns them sorted
+    newest-first.
+
+    Response shape:
+        {
+          "success": true,
+          "date":    "YYYY-MM-DD",
+          "total":   N,
+          "by_category": [{"category": "...", "count": N}, ...],
+          "leads":   [...],          // up to per_page * num_categories, newest first
+          "summary": {
+            "with_email": N, "with_phone": N, "with_founder": N,
+            "reddit": N, "maps": N,
+          }
+        }
+    """
+    import asyncio as _asyncio
+    from datetime import date as _date
+
+    db        = get_db()
+    today_str = _date.today().isoformat()          # "YYYY-MM-DD"
+    date_filter = {
+        "$gte": f"{today_str}T00:00:00",
+        "$lte": f"{today_str}T23:59:59",
+    }
+    mongo_filter: dict = {"created_at": date_filter}
+
+    # ── Single-category fast path ─────────────────────────────────────────────
+    if category:
+        coll_name = collection_for_category(category)
+        coll      = db[coll_name]
+        total     = await coll.count_documents(mongo_filter)
+        cursor    = coll.find(mongo_filter).sort("created_at", -1).limit(per_page)
+        raw_docs  = await cursor.to_list(length=per_page)
+        leads_out = []
+        for doc in raw_docs:
+            doc["id"] = str(doc.pop("_id"))
+            for tf in ("created_at", "updated_at"):
+                if isinstance(doc.get(tf), datetime):
+                    doc[tf] = doc[tf].isoformat()
+            leads_out.append(doc)
+        summary = {
+            "with_email":   sum(1 for l in leads_out if l.get("email")),
+            "with_phone":   sum(1 for l in leads_out if l.get("company_number") or l.get("phones")),
+            "with_founder": sum(1 for l in leads_out if l.get("founder_name")),
+            "reddit":       sum(1 for l in leads_out if l.get("research_source") == "reddit"),
+            "maps":         sum(1 for l in leads_out if l.get("research_source") != "reddit"),
+        }
+        return {
+            "success":     True,
+            "date":        today_str,
+            "total":       total,
+            "by_category": [{"category": category, "count": total}],
+            "leads":       leads_out,
+            "summary":     summary,
+        }
+
+    # ── All-categories fan-out ────────────────────────────────────────────────
+    # Gather known category names from the categories collection
+    try:
+        cats_coll  = db[CATEGORIES_COLLECTION]
+        cat_cursor = cats_coll.find({}, {"name": 1, "_id": 0})
+        cat_docs   = await cat_cursor.to_list(length=500)
+        cat_names  = [d["name"] for d in cat_docs if d.get("name")]
+    except Exception:
+        cat_names = []
+
+    if not cat_names:
+        cat_names = ALL_CATEGORIES
+
+    # Build collection list: all category slugs + legacy fallback
+    coll_map: dict[str, str] = {}                   # coll_name → display category
+    for cat in cat_names:
+        coll_map[collection_for_category(cat)] = cat
+    coll_map[COLLECTION_NAME] = "Legacy"             # fallback 'leads' collection
+
+    # Fan out across all collections concurrently
+    async def _query_one(coll_name: str, display_cat: str):
+        try:
+            coll  = db[coll_name]
+            total = await coll.count_documents(mongo_filter)
+            if total == 0:
+                return display_cat, 0, []
+            cursor = coll.find(mongo_filter).sort("created_at", -1).limit(per_page)
+            docs   = await cursor.to_list(length=per_page)
+            out    = []
+            for doc in docs:
+                doc["id"] = str(doc.pop("_id"))
+                for tf in ("created_at", "updated_at"):
+                    if isinstance(doc.get(tf), datetime):
+                        doc[tf] = doc[tf].isoformat()
+                if not doc.get("category"):
+                    doc["category"] = display_cat
+                out.append(doc)
+            return display_cat, total, out
+        except Exception:
+            return display_cat, 0, []
+
+    gathered = await _asyncio.gather(
+        *[_query_one(cn, cat) for cn, cat in coll_map.items()]
+    )
+
+    # Merge + sort all docs newest-first
+    all_leads: list[dict] = []
+    by_category: list[dict] = []
+    grand_total = 0
+
+    for cat_label, count, docs in gathered:
+        if count > 0:
+            by_category.append({"category": cat_label, "count": count})
+            grand_total += count
+            all_leads.extend(docs)
+
+    # Sort merged list by created_at descending (ISO strings sort correctly)
+    all_leads.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+    all_leads = all_leads[:per_page]   # cap final result
+
+    summary = {
+        "with_email":   sum(1 for l in all_leads if l.get("email")),
+        "with_phone":   sum(1 for l in all_leads if l.get("company_number") or l.get("phones")),
+        "with_founder": sum(1 for l in all_leads if l.get("founder_name")),
+        "reddit":       sum(1 for l in all_leads if l.get("research_source") == "reddit"),
+        "maps":         sum(1 for l in all_leads if l.get("research_source") != "reddit"),
+    }
+
+    return {
+        "success":     True,
+        "date":        today_str,
+        "total":       grand_total,
+        "by_category": sorted(by_category, key=lambda x: x["count"], reverse=True),
+        "leads":       all_leads,
+        "summary":     summary,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

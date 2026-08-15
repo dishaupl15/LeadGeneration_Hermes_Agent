@@ -129,6 +129,36 @@ function shortUrl(url) {
   }
 }
 
+/** Reddit source badge */
+function RedditBadge({ postUrl, subreddit, postTitle }) {
+  return (
+    <div className="flex flex-col gap-1 min-w-0">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full
+                       bg-orange-50 border border-orange-200 text-orange-700 text-[10px] font-bold w-fit">
+        <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
+          <path d="M10 0C4.478 0 0 4.478 0 10s4.478 10 10 10 10-4.478 10-10S15.522 0 10 0zm5.935 11.35c.026.19.04.382.04.577 0 2.952-3.44 5.347-7.685 5.347-4.244 0-7.684-2.395-7.684-5.347 0-.195.014-.387.04-.577a1.384 1.384 0 01-.576-1.126 1.39 1.39 0 012.39-.961c1.18-.854 2.814-1.399 4.631-1.455l.786-3.703a.278.278 0 01.328-.215l2.607.547a.972.972 0 01.946-.754.972.972 0 010 1.943.972.972 0 01-.972-.972l-2.33-.489-.71 3.34c1.8.063 3.42.608 4.59 1.457a1.39 1.39 0 012.39.961 1.384 1.384 0 01-.79 1.227zM6.875 10.417a.972.972 0 010 1.943.972.972 0 010-1.943zm6.25 0a.972.972 0 010 1.943.972.972 0 010-1.943zm-4.948 3.75c.43.43 1.128.64 2.113.64.986 0 1.684-.21 2.114-.64a.278.278 0 10-.394-.394c-.332.332-.895.59-1.72.59-.824 0-1.387-.258-1.72-.59a.278.278 0 10-.393.394z"/>
+        </svg>
+        Reddit
+      </span>
+      {subreddit && (
+        <span className="text-[10px] text-slate-400">r/{subreddit}</span>
+      )}
+      {postTitle && (
+        <span className="text-[10px] text-slate-500 line-clamp-2 max-w-[160px]" title={postTitle}>
+          {postTitle}
+        </span>
+      )}
+      {postUrl && (
+        <a href={postUrl} target="_blank" rel="noopener noreferrer"
+           className="text-[10px] text-orange-500 hover:text-orange-700 hover:underline truncate max-w-[155px]"
+           title="Open Reddit post">
+          View post ↗
+        </a>
+      )}
+    </div>
+  )
+}
+
 /* ════════════════════════════════════════════════════════════════════
    SMALL UI ATOMS
    ════════════════════════════════════════════════════════════════════ */
@@ -463,9 +493,15 @@ function LeadRow({ lead, index, onFindContacts, onOpenDetail, status, onStatusUp
         ) : <Nil />}
       </td>
 
-      {/* 7. source_url */}
-      <td className="px-4 py-3.5 max-w-[170px]">
-        {srcUrl ? (
+      {/* 7. source_url / Reddit post */}
+      <td className="px-4 py-3.5 max-w-[200px]">
+        {lead.source === 'reddit' ? (
+          <RedditBadge
+            postUrl={lead.post_url || lead.source_url}
+            subreddit={lead.subreddit}
+            postTitle={lead.post_title}
+          />
+        ) : srcUrl ? (
           <a href={srcUrl} target="_blank" rel="noopener noreferrer"
              title={srcUrl}
              className="text-xs text-indigo-500 hover:text-indigo-700 hover:underline

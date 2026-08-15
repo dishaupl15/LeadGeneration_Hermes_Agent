@@ -5,9 +5,18 @@
  *  - One place to change the base URL
  *  - One place to add auth headers later
  *  - Components stay clean and testable
+ *
+ * BASE_URL is read from the VITE_API_URL environment variable so the
+ * app works correctly when opened on any device on the local network
+ * (not just the machine running the dev server).
+ *
+ * Set it in frontend/.env:
+ *   VITE_API_URL=http://YOUR_LOCAL_IP:8002
+ *
+ * Falls back to http://localhost:8002 when the variable is not set.
  */
 
-const BASE_URL = 'http://localhost:8002'
+const BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') || 'http://localhost:8002'
 
 /**
  * Shared fetch wrapper.
@@ -22,22 +31,34 @@ const BASE_URL = 'http://localhost:8002'
 async function apiFetch(path, opts = {}) {
   const url = `${BASE_URL}${path}`
 
-  // 10-minute timeout — with 10 companies × 6 pages each, the pipeline can
-  // take 4–8 minutes (Serper + Firecrawl scraping + Enrich + Verify stages).
+  // Default: 10-minute timeout for long-running generation pipelines.
+  // Pass opts._timeoutMs to override for quick read-only calls (e.g. history, leads list).
+  const timeoutMs = opts._timeoutMs ?? (10 * 60 * 1000)
+  const { _timeoutMs: _ignored, ...fetchOpts } = opts   // strip private key before passing to fetch
+
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 10 * 60 * 1000)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   let response
   try {
     response = await fetch(url, {
-      headers: { 'Content-Type': 'application/json', ...opts.headers },
+      headers: { 'Content-Type': 'application/json', ...fetchOpts.headers },
       signal: controller.signal,
-      ...opts,
+      ...fetchOpts,
     })
   } catch (networkError) {
     clearTimeout(timer)
     if (networkError.name === 'AbortError') {
-      throw new Error('Request timed out after 10 minutes. The backend may still be processing.')
+      const secs = Math.round(timeoutMs / 1000)
+      const err = new Error(
+        secs >= 60
+          ? `Request timed out after ${Math.round(secs / 60)} minutes. The backend may still be processing.`
+          : `Request timed out after ${secs}s. Make sure the backend is running on ${BASE_URL}`
+      )
+      // Flag so callers can detect a pipeline timeout vs a real network failure
+      // and switch to polling mode instead of showing an error.
+      err.isPipelineTimeout = true
+      throw err
     }
     throw new Error(
       `Cannot reach the server. Make sure the backend is running on ${BASE_URL}`
@@ -99,6 +120,28 @@ export async function generateLeads({ industry, state, district = null, target =
 }
 
 // ── Other endpoints (ready for future use) ───────────────────────────────────
+
+/**
+ * GET /leads/today
+ * Returns all leads generated today across ALL category collections.
+ * When category is supplied, limits to that collection only.
+ *
+ * @param {{ category?: string, per_page?: number }} params
+ * @returns {Promise<{
+ *   success:     boolean,
+ *   date:        string,
+ *   total:       number,
+ *   by_category: Array<{ category: string, count: number }>,
+ *   leads:       Array<object>,
+ *   summary:     { with_email: number, with_phone: number, with_founder: number, reddit: number, maps: number },
+ * }>}
+ */
+export async function getTodayLeads(params = {}) {
+  const qs = new URLSearchParams(
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== ''))
+  ).toString()
+  return apiFetch(`/leads/today${qs ? `?${qs}` : ''}`, { _timeoutMs: 30_000 })
+}
 
 /**
  * GET /leads  — list all stored leads with optional filters
@@ -204,7 +247,7 @@ export async function getHistory(params = {}) {
   const qs = new URLSearchParams(
     Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== ''))
   ).toString()
-  return apiFetch(`/history${qs ? `?${qs}` : ''}`)
+  return apiFetch(`/history${qs ? `?${qs}` : ''}`, { _timeoutMs: 30_000 })
 }
 
 /**
@@ -212,7 +255,7 @@ export async function getHistory(params = {}) {
  * List legacy categories with lead counts (leads stored before history feature).
  */
 export async function getLegacyCategories() {
-  return apiFetch('/history/legacy')
+  return apiFetch('/history/legacy', { _timeoutMs: 30_000 })
 }
 
 /**
@@ -391,7 +434,7 @@ export async function getSocialLeadsHistory(params = {}) {
   const qs = new URLSearchParams(
     Object.fromEntries(Object.entries(params).filter(([, v]) => v != null && v !== ''))
   ).toString()
-  return apiFetch(`/social-leads/history${qs ? `?${qs}` : ''}`)
+  return apiFetch(`/social-leads/history${qs ? `?${qs}` : ''}`, { _timeoutMs: 15_000 })
 }
 
 /**
@@ -402,6 +445,58 @@ export async function seedSocialLeadsTestData(params = {}) {
   return apiFetch('/social-leads/seed-test-data', {
     method: 'POST',
     body: JSON.stringify({ clear_existing: params.clear_existing ?? false }),
+  })
+}
+
+// ── Reddit Lead Generation ────────────────────────────────────────────────────
+
+/**
+ * GET /reddit/health
+ * Check whether Reddit API credentials are configured on the backend.
+ * @returns {Promise<{ configured: boolean, status: string, message: string }>}
+ */
+export async function getRedditHealth() {
+  return apiFetch('/reddit/health')
+}
+
+/**
+ * GET /reddit/auth-test
+ * Live probe to verify REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET.
+ * @returns {Promise<{ REDDIT_CONFIGURED: boolean, REDDIT_AUTHENTICATION: string, message: string }>}
+ */
+export async function testRedditAuth() {
+  return apiFetch('/reddit/auth-test')
+}
+
+/**
+ * POST /leads/generate-reddit
+ * Full Reddit lead-generation pipeline: search → extract → dedup → MongoDB.
+ *
+ * @param {{
+ *   category: string,
+ *   location: string,
+ *   limit?:   number,
+ * }} params
+ * @returns {Promise<{
+ *   success:          boolean,
+ *   run_id:           string,
+ *   category:         string,
+ *   location:         string,
+ *   total_discovered: number,
+ *   total_valid:      number,
+ *   total_inserted:   number,
+ *   total_duplicates: number,
+ *   total_failed:     number,
+ *   elapsed_seconds:  number,
+ *   leads:            Array<object>,
+ *   pipeline_stats:   object,
+ *   error?:           string,
+ * }>}
+ */
+export async function generateRedditLeads({ category, location, limit = 25 }) {
+  return apiFetch('/leads/generate-reddit', {
+    method: 'POST',
+    body: JSON.stringify({ category, location, limit }),
   })
 }
 
@@ -483,14 +578,40 @@ export async function updateLeadFollowUp(leadId, followUpDate, category = null) 
 
 /**
  * GET /leads/follow-ups
- * Returns today's and upcoming follow-up leads.
+ * Returns overdue, today's, and upcoming follow-up leads.
+ * Excludes not_interested leads and leads where follow_up_completed=true.
  *
  * @param {string|null} category
- * @returns {Promise<{ today: object[], upcoming: object[], today_count: number, upcoming_count: number }>}
+ * @returns {Promise<{
+ *   overdue:        object[],
+ *   today:          object[],
+ *   upcoming:       object[],
+ *   overdue_count:  number,
+ *   today_count:    number,
+ *   upcoming_count: number,
+ *   due_count:      number,
+ * }>}
  */
 export async function getFollowUps(category = null) {
   const qs = category ? `?category=${encodeURIComponent(category)}` : ''
   return apiFetch(`/leads/follow-ups${qs}`)
+}
+
+/**
+ * PATCH /leads/{lead_id}/follow-up-complete
+ * Mark a follow-up as completed.
+ * Sets follow_up_completed=true and clears follow_up_date.
+ * Does NOT delete the lead.
+ *
+ * @param {string} leadId
+ * @param {string|null} category
+ * @returns {Promise<{ success: boolean, lead_id: string, lead: object }>}
+ */
+export async function markFollowUpCompleted(leadId, category = null) {
+  return apiFetch(`/leads/${encodeURIComponent(leadId)}/follow-up-complete`, {
+    method: 'PATCH',
+    body: JSON.stringify({ category: category || undefined }),
+  })
 }
 
 // ── Origami Enrichment ────────────────────────────────────────────────────────
@@ -637,4 +758,15 @@ export function buildExportUrl(format, params = {}) {
     )
   ).toString()
   return `${BASE_URL}${endpoint}${qs ? `?${qs}` : ''}`
+}
+
+/**
+ * Build the URL for the all-categories Excel export.
+ * Downloads a single .xlsx with one sheet per category that has leads,
+ * plus an "All Leads" summary sheet — all in one click.
+ *
+ * @returns {string} full download URL
+ */
+export function buildAllCategoriesExcelUrl() {
+  return `${BASE_URL}/leads/export/excel/all-categories`
 }

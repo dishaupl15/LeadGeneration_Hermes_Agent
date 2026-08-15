@@ -16,8 +16,16 @@ import {
   updateForm, deleteForm, createCampaign, listSubmissions,
 } from '../services/api'
 
-const BASE_URL = 'http://localhost:8002'
-const FRONTEND_BASE = window.location.origin
+const BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') || 'http://localhost:8002'
+
+// Public form base URL — where the FRONTEND is hosted (used for shareable links).
+// In production this must be set to your deployed frontend domain, e.g.:
+//   VITE_PUBLIC_FORM_BASE_URL=https://yourapp.vercel.app
+// Falls back to window.location.origin so local dev works without any config.
+const FRONTEND_BASE = (
+  import.meta.env.VITE_PUBLIC_FORM_BASE_URL?.replace(/\/$/, '') ||
+  window.location.origin
+)
 
 const QUESTION_TYPES = [
   { value: 'short_text', label: 'Short Text' },
