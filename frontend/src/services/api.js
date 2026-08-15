@@ -124,21 +124,18 @@ export async function generateLeads({ industry, state, district = null, target =
 /**
  * GET /leads/today
  * Returns all leads generated today across ALL category collections.
- * When category is supplied, limits to that collection only.
+ * Sends the browser's UTC offset so the backend computes the correct
+ * "today" window in the user's local timezone.
  *
  * @param {{ category?: string, per_page?: number }} params
- * @returns {Promise<{
- *   success:     boolean,
- *   date:        string,
- *   total:       number,
- *   by_category: Array<{ category: string, count: number }>,
- *   leads:       Array<object>,
- *   summary:     { with_email: number, with_phone: number, with_founder: number, reddit: number, maps: number },
- * }>}
  */
 export async function getTodayLeads(params = {}) {
+  // -new Date().getTimezoneOffset() converts JS convention (negative east)
+  // to minutes-east-of-UTC (positive east). e.g. IST = +330
+  const tzOffset = -new Date().getTimezoneOffset()
+  const merged = { tz_offset: tzOffset, ...params }
   const qs = new URLSearchParams(
-    Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== ''))
+    Object.fromEntries(Object.entries(merged).filter(([, v]) => v !== undefined && v !== ''))
   ).toString()
   return apiFetch(`/leads/today${qs ? `?${qs}` : ''}`, { _timeoutMs: 30_000 })
 }

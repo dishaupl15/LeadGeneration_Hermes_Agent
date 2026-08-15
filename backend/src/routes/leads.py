@@ -825,38 +825,52 @@ async def generate_leads(payload: GenerateLeadsRequest):
 async def get_today_leads(
     category: Optional[str] = Query(None, description="Limit to one category collection (omit = all categories)"),
     per_page: int            = Query(100, ge=1, le=500, description="Max leads to return per category"),
+    tz_offset: int           = Query(330, description="Client UTC offset in minutes (positive = east). Default 330 = IST UTC+5:30"),
 ):
     """
-    Return all leads whose created_at falls within today (UTC midnight → 23:59:59).
+    Return all leads whose created_at (stored as UTC datetime) falls within
+    today according to the client's local date (tz_offset in minutes).
 
-    When no category is supplied this endpoint fans out across EVERY known
-    category collection (leads_construction, leads_real_estate, …) plus the
-    legacy 'leads' collection, merges the results, and returns them sorted
-    newest-first.
+    Example: IST (UTC+5:30) → tz_offset=330
+      Today 00:00 IST = Yesterday 18:30 UTC
+      Today 23:59 IST = Today     18:29 UTC
 
-    Response shape:
-        {
-          "success": true,
-          "date":    "YYYY-MM-DD",
-          "total":   N,
-          "by_category": [{"category": "...", "count": N}, ...],
-          "leads":   [...],          // up to per_page * num_categories, newest first
-          "summary": {
-            "with_email": N, "with_phone": N, "with_founder": N,
-            "reddit": N, "maps": N,
-          }
-        }
+    Fans out across ALL known category collections and the legacy 'leads'
+    collection concurrently so results span every category.
     """
     import asyncio as _asyncio
-    from datetime import date as _date
+    from datetime import date as _date, timedelta as _td
 
-    db        = get_db()
-    today_str = _date.today().isoformat()          # "YYYY-MM-DD"
-    date_filter = {
-        "$gte": f"{today_str}T00:00:00",
-        "$lte": f"{today_str}T23:59:59",
+    db = get_db()
+
+    # ── Compute UTC window for "today" in the client's timezone ──────────────
+    offset      = _td(minutes=int(tz_offset))
+    now_local   = datetime.now(timezone.utc) + offset
+    today_local = now_local.date()                              # local YYYY-MM-DD
+
+    # Start of today (local midnight) → UTC
+    day_start_local = datetime(today_local.year, today_local.month, today_local.day,
+                                0, 0, 0, tzinfo=timezone.utc) - offset
+    # End of today (local 23:59:59.999) → UTC
+    day_end_local   = day_start_local + _td(days=1) - _td(microseconds=1)
+
+    today_str   = today_local.isoformat()   # returned to frontend as "YYYY-MM-DD"
+
+    # Use proper datetime objects — never strings — for BSON Date comparison
+    mongo_filter: dict = {
+        "created_at": {
+            "$gte": day_start_local,
+            "$lte": day_end_local,
+        }
     }
-    mongo_filter: dict = {"created_at": date_filter}
+
+    def _serialize(doc: dict) -> dict:
+        doc["id"] = str(doc.pop("_id"))
+        for tf in ("created_at", "updated_at"):
+            v = doc.get(tf)
+            if isinstance(v, datetime):
+                doc[tf] = v.isoformat()
+        return doc
 
     # ── Single-category fast path ─────────────────────────────────────────────
     if category:
@@ -865,13 +879,7 @@ async def get_today_leads(
         total     = await coll.count_documents(mongo_filter)
         cursor    = coll.find(mongo_filter).sort("created_at", -1).limit(per_page)
         raw_docs  = await cursor.to_list(length=per_page)
-        leads_out = []
-        for doc in raw_docs:
-            doc["id"] = str(doc.pop("_id"))
-            for tf in ("created_at", "updated_at"):
-                if isinstance(doc.get(tf), datetime):
-                    doc[tf] = doc[tf].isoformat()
-            leads_out.append(doc)
+        leads_out = [_serialize(doc) for doc in raw_docs]
         summary = {
             "with_email":   sum(1 for l in leads_out if l.get("email")),
             "with_phone":   sum(1 for l in leads_out if l.get("company_number") or l.get("phones")),
@@ -882,14 +890,14 @@ async def get_today_leads(
         return {
             "success":     True,
             "date":        today_str,
+            "tz_offset":   tz_offset,
             "total":       total,
-            "by_category": [{"category": category, "count": total}],
+            "by_category": [{"category": category, "count": total}] if total else [],
             "leads":       leads_out,
             "summary":     summary,
         }
 
     # ── All-categories fan-out ────────────────────────────────────────────────
-    # Gather known category names from the categories collection
     try:
         cats_coll  = db[CATEGORIES_COLLECTION]
         cat_cursor = cats_coll.find({}, {"name": 1, "_id": 0})
@@ -901,13 +909,12 @@ async def get_today_leads(
     if not cat_names:
         cat_names = ALL_CATEGORIES
 
-    # Build collection list: all category slugs + legacy fallback
-    coll_map: dict[str, str] = {}                   # coll_name → display category
+    # Deduplicated map: collection_name → display label
+    coll_map: dict[str, str] = {}
     for cat in cat_names:
         coll_map[collection_for_category(cat)] = cat
-    coll_map[COLLECTION_NAME] = "Legacy"             # fallback 'leads' collection
+    coll_map[COLLECTION_NAME] = "Legacy"
 
-    # Fan out across all collections concurrently
     async def _query_one(coll_name: str, display_cat: str):
         try:
             coll  = db[coll_name]
@@ -918,10 +925,7 @@ async def get_today_leads(
             docs   = await cursor.to_list(length=per_page)
             out    = []
             for doc in docs:
-                doc["id"] = str(doc.pop("_id"))
-                for tf in ("created_at", "updated_at"):
-                    if isinstance(doc.get(tf), datetime):
-                        doc[tf] = doc[tf].isoformat()
+                _serialize(doc)
                 if not doc.get("category"):
                     doc["category"] = display_cat
                 out.append(doc)
@@ -933,7 +937,6 @@ async def get_today_leads(
         *[_query_one(cn, cat) for cn, cat in coll_map.items()]
     )
 
-    # Merge + sort all docs newest-first
     all_leads: list[dict] = []
     by_category: list[dict] = []
     grand_total = 0
@@ -944,9 +947,9 @@ async def get_today_leads(
             grand_total += count
             all_leads.extend(docs)
 
-    # Sort merged list by created_at descending (ISO strings sort correctly)
+    # Sort newest-first; ISO strings from .isoformat() sort lexicographically
     all_leads.sort(key=lambda d: d.get("created_at") or "", reverse=True)
-    all_leads = all_leads[:per_page]   # cap final result
+    all_leads = all_leads[:per_page]
 
     summary = {
         "with_email":   sum(1 for l in all_leads if l.get("email")),
@@ -959,6 +962,7 @@ async def get_today_leads(
     return {
         "success":     True,
         "date":        today_str,
+        "tz_offset":   tz_offset,
         "total":       grand_total,
         "by_category": sorted(by_category, key=lambda x: x["count"], reverse=True),
         "leads":       all_leads,
@@ -1052,7 +1056,8 @@ async def get_status_counts(
     coll_name = collection_for_category(category) if category else COLLECTION_NAME
     coll      = db[coll_name]
 
-    cutoff_2d = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    # Use a real datetime object — never an ISO string — for BSON Date comparison
+    cutoff_2d = datetime.now(timezone.utc) - timedelta(days=2)
 
     new_status_filter = {"$or": [
         {"status": "new"},
@@ -1597,11 +1602,16 @@ def _build_leads_filter(
     date_from: Optional[str],
     date_to:   Optional[str],
 ) -> dict:
-    """Return a MongoDB filter dict from the standard query params."""
+    """Return a MongoDB filter dict from the standard query params.
+
+    created_at is stored as a UTC datetime object (BSON Date).
+    All comparisons MUST use datetime objects, never ISO strings.
+    """
     from datetime import timedelta
 
     mongo_filter: dict = {}
-    cutoff_2d = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    # 2-day cutoff as a real datetime object (not a string)
+    cutoff_2d = datetime.now(timezone.utc) - timedelta(days=2)
 
     new_status_filter = {"$or": [
         {"status": "new"},
@@ -1631,23 +1641,36 @@ def _build_leads_filter(
         else:
             mongo_filter["status"] = status
 
-    # Date range
+    # Date range — convert YYYY-MM-DD strings → UTC datetime objects
     if date_from or date_to:
         date_filter: dict = {}
         if date_from:
-            date_filter["$gte"] = f"{date_from}T00:00:00"
+            try:
+                dt_from = datetime.strptime(date_from, "%Y-%m-%d").replace(
+                    hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+                )
+                date_filter["$gte"] = dt_from
+            except ValueError:
+                pass
         if date_to:
-            date_filter["$lte"] = f"{date_to}T23:59:59"
-        existing_and = mongo_filter.get("$and")
-        if existing_and:
-            existing_and.append({"created_at": date_filter})
-        else:
-            existing_ca = mongo_filter.get("created_at")
-            if existing_ca:
-                mongo_filter["$and"] = [{"created_at": existing_ca}, {"created_at": date_filter}]
-                del mongo_filter["created_at"]
+            try:
+                dt_to = datetime.strptime(date_to, "%Y-%m-%d").replace(
+                    hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc
+                )
+                date_filter["$lte"] = dt_to
+            except ValueError:
+                pass
+        if date_filter:
+            existing_and = mongo_filter.get("$and")
+            if existing_and:
+                existing_and.append({"created_at": date_filter})
             else:
-                mongo_filter["created_at"] = date_filter
+                existing_ca = mongo_filter.get("created_at")
+                if existing_ca:
+                    mongo_filter["$and"] = [{"created_at": existing_ca}, {"created_at": date_filter}]
+                    del mongo_filter["created_at"]
+                else:
+                    mongo_filter["created_at"] = date_filter
 
     # Multi-field search
     if search and search.strip():

@@ -273,7 +273,7 @@ function GenerateLeadsButton({ ready, isLoading, isPolling, polledCount, elapsed
 }
 
 /* ── Today's Leads section ──────────────────────────────────────────────── */
-function TodayLeadsSection({ category, refreshTrigger, id }) {
+function TodayLeadsSection({ category, refreshTrigger, id, onCategoryClick }) {
   const [data,    setData]    = useState(null)   // full API response
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState('')
@@ -287,17 +287,22 @@ function TodayLeadsSection({ category, refreshTrigger, id }) {
     setLoading(true)
     setError('')
 
-    getTodayLeads({ ...(category ? { category } : {}), per_page: 100 })
+    // Always fetch all categories so we get by_category breakdown regardless
+    // of which category the user has selected in the generator
+    getTodayLeads({ per_page: 500 })
       .then(res => { if (!cancelled) setData(res) })
       .catch(err => { if (!cancelled) setError(err.message || "Failed to load today's leads.") })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [category, refreshTrigger, tick])
+  }, [refreshTrigger, tick])
 
-  const total    = data?.total      ?? 0
-  const leads    = data?.leads      ?? []
-  const summary  = data?.summary    ?? {}
-  const byCategory = data?.by_category ?? []
+  const total      = data?.total        ?? 0
+  const byCategory = data?.by_category  ?? []
+
+  // If a category filter is active in the generator, show only that row's count
+  const displayRows = category
+    ? byCategory.filter(bc => bc.category === category)
+    : byCategory
 
   return (
     <div id={id} className="crm-card overflow-hidden">
@@ -343,7 +348,7 @@ function TodayLeadsSection({ category, refreshTrigger, id }) {
             </p>
           </div>
 
-          {/* Count badge */}
+          {/* Total count badge */}
           {!loading && total > 0 && (
             <span className="ml-1 inline-flex items-center justify-center min-w-[22px] h-5 px-1.5
                              rounded-full bg-amber-500 text-white text-[11px] font-bold shadow-sm">
@@ -429,153 +434,73 @@ function TodayLeadsSection({ category, refreshTrigger, id }) {
             </div>
           )}
 
-          {/* Results */}
+          {/* ── Results: total + category-wise counts (clickable) ── */}
           {!loading && !error && total > 0 && (
-            <>
-              {/* Summary badges row */}
-              <div className="flex flex-wrap gap-2 mb-4">
-                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
-                                 bg-amber-50 border border-amber-200 text-amber-700 text-xs font-semibold">
-                  🏢 {total} compan{total !== 1 ? 'ies' : 'y'}
-                </span>
+            <div className="space-y-3">
 
-                {(summary.with_email ?? 0) > 0 && (
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
-                                   bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold">
-                    ✉ {summary.with_email} with email
-                  </span>
-                )}
-                {(summary.with_phone ?? 0) > 0 && (
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
-                                   bg-sky-50 border border-sky-200 text-sky-700 text-xs font-semibold">
-                    📞 {summary.with_phone} with phone
-                  </span>
-                )}
-                {(summary.with_founder ?? 0) > 0 && (
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
-                                   bg-violet-50 border border-violet-200 text-violet-700 text-xs font-semibold">
-                    👤 {summary.with_founder} with founder
-                  </span>
-                )}
-                {(summary.reddit ?? 0) > 0 && (
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
-                                   bg-orange-50 border border-orange-200 text-orange-700 text-xs font-semibold">
-                    🟠 {summary.reddit} Reddit
-                  </span>
-                )}
-                {(summary.maps ?? 0) > 0 && (
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
-                                   bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-semibold">
-                    🗺️ {summary.maps} Maps
-                  </span>
-                )}
+              {/* Total count row */}
+              <div className="flex items-center gap-3 px-4 py-3 rounded-xl
+                              bg-amber-50 border border-amber-200">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 flex-shrink-0"/>
+                <span className="flex-1 text-sm font-bold text-amber-800">
+                  Total leads generated today
+                </span>
+                <span className="inline-flex items-center justify-center min-w-[32px] h-6 px-2
+                                 rounded-full bg-amber-500 text-white text-xs font-bold shadow-sm">
+                  {total}
+                </span>
               </div>
 
-              {/* Per-category breakdown — only shown when querying all categories */}
-              {!category && byCategory.length > 1 && (
-                <div className="flex flex-wrap gap-2 mb-4">
-                  {byCategory.map(bc => (
-                    <span key={bc.category}
-                          className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full
-                                     bg-slate-100 border border-slate-200 text-slate-600
-                                     text-[11px] font-medium">
-                      {bc.category}
-                      <span className="font-bold text-slate-800 ml-0.5">{bc.count}</span>
-                    </span>
-                  ))}
-                </div>
+              {/* Hint */}
+              {displayRows.length > 0 && (
+                <p className="text-[11px] text-slate-400 px-1">
+                  Click a category to filter the <strong>All Leads</strong> section below.
+                </p>
               )}
 
-              {/* Leads list */}
+              {/* Category-wise count rows (clickable) */}
               <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 overflow-hidden">
-                {leads.slice(0, 50).map((lead, i) => {
-                  const id        = lead.id ?? lead._id
-                  const isReddit  = lead.research_source === 'reddit'
-                  const hasPhone  = lead.company_number || (lead.phones?.length ?? 0) > 0
+                {displayRows.map(bc => (
+                  <button
+                    key={bc.category}
+                    onClick={() => onCategoryClick && onCategoryClick(bc.category, today)}
+                    className="w-full flex items-center gap-3 px-4 py-3
+                               hover:bg-amber-50/60 transition-colors text-left group"
+                    title={`Filter All Leads to today's ${bc.category} leads`}
+                  >
+                    {/* Category label */}
+                    <span className="flex-1 text-sm font-semibold text-slate-700 group-hover:text-amber-700
+                                     transition-colors">
+                      {bc.category}
+                    </span>
 
-                  return (
-                    <div key={id ?? i}
-                         className="flex items-center gap-3 px-4 py-3 hover:bg-amber-50/40 transition-colors">
+                    {/* Count badge */}
+                    <span className="inline-flex items-center justify-center min-w-[32px] h-6 px-2
+                                     rounded-full bg-slate-100 border border-slate-200
+                                     text-slate-700 text-xs font-bold
+                                     group-hover:bg-amber-500 group-hover:border-amber-500
+                                     group-hover:text-white transition-colors">
+                      {bc.count}
+                    </span>
 
-                      {/* Source dot */}
-                      <span className={`w-2 h-2 rounded-full flex-shrink-0
-                                        ${isReddit ? 'bg-orange-400' : 'bg-indigo-400'}`}
-                            title={isReddit ? 'Reddit' : 'Google Maps'} />
+                    {/* Arrow hint */}
+                    <svg className="w-3.5 h-3.5 text-slate-300 group-hover:text-amber-500 flex-shrink-0
+                                    transition-colors"
+                         fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M9 5l7 7-7 7"/>
+                    </svg>
+                  </button>
+                ))}
 
-                      {/* Company info */}
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-semibold text-slate-800 truncate">
-                          {lead.company_name || '—'}
-                        </p>
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-0.5">
-                          {lead.category && (
-                            <span className="text-[10px] font-medium text-slate-400 bg-slate-100
-                                             px-1.5 py-px rounded">{lead.category}</span>
-                          )}
-                          {(lead.city || lead.state) && (
-                            <span className="text-[10px] text-slate-400">
-                              📍 {[lead.city, lead.state].filter(Boolean).join(', ')}
-                            </span>
-                          )}
-                          {lead.created_at && (
-                            <span className="text-[10px] text-slate-300">
-                              {new Date(lead.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Contact icons */}
-                      <div className="flex items-center gap-1.5 flex-shrink-0">
-                        {lead.email && (
-                          <span title={lead.email}
-                                className="inline-flex items-center px-1.5 py-0.5 rounded-full
-                                           bg-emerald-50 border border-emerald-200 text-emerald-700 text-[10px]">
-                            ✉
-                          </span>
-                        )}
-                        {hasPhone && (
-                          <span title={lead.company_number}
-                                className="inline-flex items-center px-1.5 py-0.5 rounded-full
-                                           bg-sky-50 border border-sky-200 text-sky-700 text-[10px]">
-                            📞
-                          </span>
-                        )}
-                        {lead.founder_name && (
-                          <span title={lead.founder_name}
-                                className="inline-flex items-center px-1.5 py-0.5 rounded-full
-                                           bg-violet-50 border border-violet-200 text-violet-700 text-[10px]">
-                            👤
-                          </span>
-                        )}
-                      </div>
-
-                      {/* Status pill */}
-                      <span className={`flex-shrink-0 inline-flex items-center px-2 py-0.5 rounded-full
-                                        text-[10px] font-bold border ${
-                        lead.status === 'interested'
-                          ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                          : lead.status === 'not_interested'
-                            ? 'bg-rose-50 border-rose-200 text-rose-700'
-                            : 'bg-slate-100 border-slate-200 text-slate-500'
-                      }`}>
-                        {lead.status === 'interested'     ? 'Interested'
-                          : lead.status === 'not_interested' ? 'Not Interested'
-                          : 'New'}
-                      </span>
-                    </div>
-                  )
-                })}
-
-                {/* "More" footer */}
-                {total > 50 && (
-                  <div className="px-4 py-3 bg-amber-50/60 text-center text-xs text-slate-500">
-                    Showing 50 of <strong>{total}</strong> leads generated today.
-                    Use the <strong>All Leads</strong> explorer below with today's date filter to see all.
+                {/* No rows for the selected category */}
+                {displayRows.length === 0 && category && (
+                  <div className="px-4 py-4 text-center text-xs text-slate-400">
+                    No leads for <strong>{category}</strong> today.
                   </div>
                 )}
               </div>
-            </>
+            </div>
           )}
         </div>
       )}
@@ -641,12 +566,18 @@ function StatCard({ label, value, icon, color }) {
  *
  * Tabs: New Leads | Old Untouched | Interested | Not Interested | Follow-ups | All Leads
  */
-function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate }) {
-  const [activeTab,  setActiveTab]  = useState('all')
+function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate,
+                         initialDateFrom, initialDateTo, initialTab,
+                         crmCategory, crmDateFrom, crmDateTo, crmTab, id }) {
+  const [activeTab,  setActiveTab]  = useState(initialTab || crmTab || 'all')
   const [search,     setSearch]     = useState('')
-  const [dateFrom,   setDateFrom]   = useState('')
-  const [dateTo,     setDateTo]     = useState('')
+  const [dateFrom,   setDateFrom]   = useState(initialDateFrom || crmDateFrom || '')
+  const [dateTo,     setDateTo]     = useState(initialDateTo   || crmDateTo   || '')
   const [debouncedSearch, setDebouncedSearch] = useState('')
+
+  // The effective category: crmCategory (set by Today's section click) overrides the
+  // globally selected category so the CRM shows the clicked category's leads.
+  const effectiveCategory = crmCategory || category
 
   // Leads query state
   const [leads,    setLeads]    = useState([])
@@ -660,6 +591,20 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate 
   const [counts,        setCounts]        = useState({})
   const [countsLoading, setCountsLoading] = useState(false)
 
+  // Sync when parent pushes a new filter via crmCategory / crmDateFrom / crmDateTo / crmTab
+  useEffect(() => {
+    if (crmDateFrom !== undefined) setDateFrom(crmDateFrom || '')
+    if (crmDateTo   !== undefined) setDateTo(crmDateTo     || '')
+    if (crmTab      !== undefined) setActiveTab(crmTab     || 'all')
+  }, [crmCategory, crmDateFrom, crmDateTo, crmTab])
+
+  // Sync when parent pushes a new filter (e.g. category-click from Today's section)
+  useEffect(() => {
+    if (initialDateFrom !== undefined) setDateFrom(initialDateFrom || '')
+    if (initialDateTo   !== undefined) setDateTo(initialDateTo     || '')
+    if (initialTab      !== undefined) setActiveTab(initialTab     || 'all')
+  }, [initialDateFrom, initialDateTo, initialTab])
+
   // Debounce search input (300 ms) so we don't fire on every keystroke
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 300)
@@ -670,12 +615,12 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate 
   useEffect(() => {
     let cancelled = false
     setCountsLoading(true)
-    getLeadStatusCounts(category || null)
+    getLeadStatusCounts(effectiveCategory || null)
       .then(res => { if (!cancelled) setCounts(res.counts ?? {}) })
       .catch(() => { if (!cancelled) setCounts({}) })
       .finally(() => { if (!cancelled) setCountsLoading(false) })
     return () => { cancelled = true }
-  }, [category, refreshTrigger])
+  }, [effectiveCategory, refreshTrigger])
 
   // Re-fetch leads whenever any filter changes
   useEffect(() => {
@@ -683,7 +628,7 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate 
     setLoading(true)
     setError('')
     const params = {
-      ...(category  ? { category } : {}),
+      ...(effectiveCategory ? { category: effectiveCategory } : {}),
       tab:       activeTab,
       page,
       per_page:  PER_PAGE,
@@ -701,10 +646,10 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate 
       .catch(err => { if (!cancelled) setError(err.message || 'Failed to load leads.') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [category, activeTab, page, debouncedSearch, dateFrom, dateTo, refreshTrigger])
+  }, [effectiveCategory, activeTab, page, debouncedSearch, dateFrom, dateTo, refreshTrigger])
 
   // Reset to page 1 when filters change (but not page itself)
-  useEffect(() => { setPage(1) }, [category, activeTab, debouncedSearch, dateFrom, dateTo])
+  useEffect(() => { setPage(1) }, [effectiveCategory, activeTab, debouncedSearch, dateFrom, dateTo])
 
   const TABS = [
     { key: 'new_leads',      label: 'New Leads',      countKey: 'new',           dot: 'bg-sky-400',     active: 'bg-sky-600 text-white border-sky-600',                       inactive: 'bg-white text-sky-700 border-sky-200 hover:bg-sky-50' },
@@ -718,7 +663,7 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate 
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE))
 
   return (
-    <div className="crm-card p-5">
+    <div id={id} className="crm-card p-5">
 
       {/* ── Header ── */}
       <div className="flex items-center justify-between mb-4">
@@ -733,13 +678,20 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate 
               — {counts.total ?? 0} total
             </span>
           )}
+          {crmCategory && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full
+                             bg-amber-100 border border-amber-300 text-amber-700 text-xs font-semibold">
+              {crmCategory}
+              <span className="text-slate-400 font-normal ml-0.5">· today</span>
+            </span>
+          )}
         </h2>
 
         {/* Export buttons */}
         <div className="flex items-center gap-2">
           <a
             href={buildExportUrl('csv', {
-              ...(category ? { category } : {}),
+              ...(effectiveCategory ? { category: effectiveCategory } : {}),
               ...(activeTab !== 'all' ? { tab: activeTab } : {}),
               ...(debouncedSearch ? { search: debouncedSearch } : {}),
               ...(dateFrom ? { date_from: dateFrom } : {}),
@@ -760,7 +712,7 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate 
           </a>
           <a
             href={buildExportUrl('excel', {
-              ...(category ? { category } : {}),
+              ...(effectiveCategory ? { category: effectiveCategory } : {}),
               ...(activeTab !== 'all' ? { tab: activeTab } : {}),
               ...(debouncedSearch ? { search: debouncedSearch } : {}),
               ...(dateFrom ? { date_from: dateFrom } : {}),
@@ -968,6 +920,10 @@ export default function LeadGeneration() {
   const [showHistory,      setShowHistory]      = useState(false)
   const [showFollowUps,    setShowFollowUps]    = useState(false)
 
+  // CRM filter override — set when user clicks a category in Today's section
+  // { category, dateFrom, dateTo, tab }
+  const [crmFilter, setCrmFilter] = useState({ category: null, dateFrom: '', dateTo: '', tab: 'all' })
+
   // ── Reddit state ──────────────────────────────────────────────────────────
   const [redditLoading, setRedditLoading] = useState(false)
   const [redditLeads,   setRedditLeads]   = useState([])
@@ -1116,8 +1072,21 @@ export default function LeadGeneration() {
     })
   }, [activeLeads, sortDir])
 
+  // ── Today's section: category click → CRM filter ─────────────────────────
+  const handleTodayCategoryClick = useCallback((catName, dateStr) => {
+    // Set the CRM override filter: category + today's date range + 'all' tab
+    setCrmFilter({ category: catName, dateFrom: dateStr, dateTo: dateStr, tab: 'all' })
+    // Scroll to the CRM section
+    setTimeout(() => {
+      const el = document.getElementById('crm-leads-explorer')
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 50)
+  }, [])
+
   const handleCategorySelect = (cat) => {
     setSelectedCategory(cat)
+    // Clear any CRM override so the CRM explorer follows the newly selected category
+    setCrmFilter({ category: null, dateFrom: '', dateTo: '', tab: 'all' })
     if (activeLeads.length > 0) {
       clear()
       setRedditLeads([])
@@ -1557,14 +1526,20 @@ export default function LeadGeneration() {
           id="today-leads-section"
           category={selectedCategory}
           refreshTrigger={refreshTick}
+          onCategoryClick={handleTodayCategoryClick}
         />
 
         {/* ── All Leads Explorer (server-driven: tabs + search + date) ── */}
         <LeadsExplorer
+          id="crm-leads-explorer"
           category={selectedCategory}
           refreshTrigger={refreshTick}
           onStatusUpdate={handleStatusUpdate}
           onLeadUpdate={handleLeadUpdate}
+          crmCategory={crmFilter.category}
+          crmDateFrom={crmFilter.dateFrom}
+          crmDateTo={crmFilter.dateTo}
+          crmTab={crmFilter.tab}
         />
 
         {/* ── Origami Coverage Stats (live from DB — never hardcoded) ── */}
