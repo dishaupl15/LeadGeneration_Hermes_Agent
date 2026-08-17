@@ -50,6 +50,46 @@ def _log(msg: str) -> None:
 # Keep phrases concrete and industry-specific to avoid irrelevant results.
 
 _CATEGORY_PHRASES: dict[str, list[str]] = {
+    # ── AI / Artificial Intelligence ─────────────────────────────────────────
+    # Use SPECIFIC phrases so Google Maps returns relevant businesses.
+    # Generic "AI" matches unrelated businesses with "AI" in their Hindi/local
+    # name. Phrases like "artificial intelligence company" are far more precise.
+    "ai": [
+        "artificial intelligence company",
+        "AI software company",
+        "machine learning company",
+        "deep learning company",
+        "AI technology company",
+        "AI solutions company",
+        "AI startup",
+        "AI services company",
+        "generative AI company",
+        "NLP company",
+        "computer vision company",
+        "intelligent automation company",
+        "AI consulting firm",
+        "AI platform company",
+        "data science company",
+    ],
+    "artificial intelligence": [
+        "artificial intelligence company",
+        "AI software company",
+        "machine learning company",
+        "AI technology company",
+        "AI solutions company",
+        "AI startup",
+        "generative AI company",
+        "intelligent automation company",
+        "AI consulting firm",
+        "data science company",
+    ],
+    "machine learning": [
+        "machine learning company",
+        "AI machine learning startup",
+        "data science company",
+        "deep learning company",
+        "AI software company",
+    ],
     "real estate":      [
         "real estate company",
         "property developer",
@@ -113,18 +153,103 @@ _CATEGORY_PHRASES: dict[str, list[str]] = {
 def _get_phrases(category: str) -> list[str]:
     """Return search phrases for a category. Falls back to generic phrases."""
     cat = category.lower().strip()
-    if cat in _CATEGORY_PHRASES:
-        return _CATEGORY_PHRASES[cat]
-    # Substring match
+
+    # Alias map: normalise common variant spellings to a canonical key
+    _ALIAS: dict[str, str] = {
+        "ai": "ai",
+        "artificial intelligence": "artificial intelligence",
+        "machine learning": "machine learning",
+        "ml": "machine learning",
+        "deep learning": "machine learning",
+        "generative ai": "ai",
+        "gen ai": "ai",
+        "nlp": "ai",
+        "real estate": "real estate",
+        "realty": "real estate",
+        "property": "real estate",
+        "it": "it",
+        "information technology": "it",
+        "software": "it",
+        "tech": "technology",
+        "technology": "technology",
+        "fintech": "fintech",
+        "financial technology": "fintech",
+        "healthcare": "healthcare",
+        "health": "healthcare",
+        "pharma": "pharma",
+        "pharmaceutical": "pharma",
+        "pharmaceuticals": "pharma",
+        "manufacturing": "manufacturing",
+        "fabrication": "manufacturing",
+        "industrial": "manufacturing",
+        "construction": "construction",
+        "contractor": "construction",
+        "civil": "construction",
+        "education": "education",
+        "edtech": "education",
+        "logistics": "logistics",
+        "transport": "logistics",
+        "automotive": "automotive",
+        "automobile": "automotive",
+        "auto": "automotive",
+        "retail": "retail",
+        "fmcg": "retail",
+        "agriculture": "agriculture",
+        "agri": "agriculture",
+        "agro": "agriculture",
+        "farming": "agriculture",
+        "media": "media",
+        "entertainment": "media",
+        "finance": "finance",
+        "insurance": "insurance",
+        "consulting": "consulting",
+        "legal": "legal",
+        "marketing": "marketing",
+        "biotech": "biotech",
+        "biotechnology": "biotech",
+        "life sciences": "biotech",
+        "cybersecurity": "cybersecurity",
+        "cyber security": "cybersecurity",
+        "saas": "saas",
+        "aerospace": "aerospace",
+        "telecommunications": "telecommunications",
+        "telecom": "telecommunications",
+        "food": "food",
+        "food and beverage": "food",
+        "f&b": "food",
+        "textile": "textile",
+        "garment": "textile",
+        "apparel": "textile",
+        "chemicals": "chemicals",
+        "chemical": "chemicals",
+        "energy": "energy",
+        "solar": "energy",
+        "renewable energy": "energy",
+        "hospitality": "hospitality",
+        "hotel": "hospitality",
+        "travel": "travel",
+        "ecommerce": "e-commerce",
+        "e-commerce": "e-commerce",
+    }
+
+    # Resolve alias
+    resolved = _ALIAS.get(cat, cat)
+
+    if resolved in _CATEGORY_PHRASES:
+        return _CATEGORY_PHRASES[resolved]
+
+    # Substring match against canonical keys
     for key, phrases in _CATEGORY_PHRASES.items():
-        if key in cat or cat in key:
+        if key in resolved or resolved in key:
             return phrases
-    # Generic fallback
+
+    # Generic fallback — use category name + common qualifiers
+    # Wrap in quotes to force Google Maps to treat it as a literal phrase
     return [
-        category,
-        f"{category} company",
-        f"{category} business",
-        f"{category} firm",
+        f'"{category}" company',
+        f'"{category}" services',
+        f'"{category}" startup',
+        f'"{category}" solutions',
     ]
 
 

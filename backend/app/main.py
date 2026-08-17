@@ -1,12 +1,15 @@
 """
 app/main.py  —  FastAPI application entry point
 ═══════════════════════════════════════════════════════════════════════════════
-Start the server:
-    uvicorn app.main:app --reload
+Start the server (always binds to 0.0.0.0 so it's reachable from the network):
+    uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
+
+Or use the launcher shortcut:
+    python run.py
 
 Interactive docs:
-    http://127.0.0.1:8000/docs
-    http://127.0.0.1:8000/redoc
+    http://localhost:8002/docs
+    http://10.YOUR.IP:8002/docs
 """
 
 from contextlib import asynccontextmanager

@@ -1122,6 +1122,39 @@ async def run_maps_pipeline(
             seen_names.add(name)
         unique.append(c)
 
+    # ── STEP 5: Category validation ───────────────────────────────────────────
+    # Reject companies that don't belong to the requested category.
+    # Logged per-company; rejected companies are never passed to MongoDB.
+    try:
+        from app.services.category_filter import (
+            filter_companies as _filter_companies,
+            log_filter_summary as _log_filter_summary,
+        )
+        valid_companies, rejected_companies = _filter_companies(unique, category)
+
+        # Build rejection reason summary
+        reasons: dict[str, int] = {}
+        for rc in rejected_companies:
+            # re-validate to get reason (cheap — same fingerprint)
+            from app.services.category_filter import validate_category as _vc
+            res = _vc(rc, category)
+            r = res.reason.split(":")[0] if ":" in res.reason else res.reason
+            reasons[r] = reasons.get(r, 0) + 1
+
+        _log_filter_summary(
+            category=category,
+            location=district or state,
+            requested=target,
+            candidates=len(unique),
+            valid=len(valid_companies),
+            rejected=len(rejected_companies),
+            reasons=reasons if reasons else None,
+        )
+
+        unique = valid_companies
+    except Exception as _cf_exc:
+        _log("CATEGORY_FILTER", f"Category filter error (non-fatal, all companies kept): {_cf_exc}")
+
     _pipeline_stats.final_companies = len(unique)
     elapsed = round(time.monotonic() - t0, 1)
 
@@ -1131,7 +1164,6 @@ async def run_maps_pipeline(
     n_phone2  = sum(1 for c in unique if c.get("company_number"))
     n_addr    = sum(1 for c in unique if c.get("address"))
     n_founder = sum(1 for c in unique if c.get("founder_name"))
-
     _log("PIPELINE", f"Final companies: {len(unique)}")
     _log("PIPELINE", f"Google Maps discovered: {ps['google_maps_discovered']}")
     _log("PIPELINE", f"Google Maps duplicates: {ps['google_maps_duplicates']}")

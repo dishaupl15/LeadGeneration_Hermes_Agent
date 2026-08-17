@@ -411,6 +411,55 @@ async def generate_leads(payload: GenerateLeadsRequest):
         unique = unique[:target]
         _log("DEDUP", f"Capped to target={target}")
 
+    # ── Stage 4b: Category validation ────────────────────────────────────────
+    # Reject any company that does not belong to the requested category.
+    # Runs AFTER enrichment so all text signals (description, CE fields,
+    # Firecrawl markdown) are available for the fingerprint.
+    # Rejected companies are NEVER inserted into MongoDB.
+    try:
+        from app.services.category_filter import (
+            filter_companies as _filter_companies,
+            log_filter_summary as _log_filter_summary,
+            validate_category as _validate_category,
+        )
+        valid_companies, rejected_companies = _filter_companies(unique, industry)
+
+        # Build rejection reason summary for logs
+        rejection_reasons: dict[str, int] = {}
+        for rc in rejected_companies:
+            res = _validate_category(rc, industry)
+            r = res.reason.split(":")[0] if ":" in res.reason else res.reason
+            rejection_reasons[r] = rejection_reasons.get(r, 0) + 1
+
+        _log_filter_summary(
+            category=industry,
+            location=district or state,
+            requested=target,
+            candidates=len(unique),
+            valid=len(valid_companies),
+            rejected=len(rejected_companies),
+            reasons=rejection_reasons if rejection_reasons else None,
+        )
+
+        if rejected_companies:
+            await _append_log(
+                db_early, run_id, "FILTER", "category_validation",
+                (
+                    f"Category validation: {len(valid_companies)} accepted, "
+                    f"{len(rejected_companies)} rejected for category={industry!r}. "
+                    f"Rejection reasons: {rejection_reasons}"
+                ),
+            )
+
+        unique = valid_companies
+        _log("CATEGORY_FILTER", (
+            f"Category validation complete — "
+            f"valid={len(valid_companies)} rejected={len(rejected_companies)} "
+            f"category={industry!r}"
+        ))
+    except Exception as _cf_exc:
+        _log("CATEGORY_FILTER", f"Category filter error (non-fatal, all companies kept): {_cf_exc}")
+
     # ── MongoDB setup ─────────────────────────────────────────────────────────
     db        = get_db()
     coll_name = collection_for_category(industry)   # e.g. "leads_construction"
@@ -695,6 +744,7 @@ async def generate_leads(payload: GenerateLeadsRequest):
         f"new_inserted={inserted_count} | "
         f"already_existed={updated_count} | "
         f"returned_to_ui={len(leads_out)} | "
+        f"category_filter_valid={len(unique)} | "
         f"email={n_email}/{len(unique)} | "
         f"phone={n_phone}/{len(unique)} | "
         f"address={n_address}/{len(unique)} | "
@@ -981,37 +1031,114 @@ async def get_today_leads(
     tags=["Leads"],
 )
 async def get_leads(
-    category:  Optional[str] = Query(None, description="Filter by industry category"),
-    search:    Optional[str] = Query(None, description="Search across company_name, email, phones, founder_name"),
-    status:    Optional[str] = Query(None, description="Filter by status: new|interested|not_interested"),
-    tab:       Optional[str] = Query(None, description="Smart tab: new_leads|old_untouched|interested|not_interested|follow_ups|all"),
-    date_from: Optional[str] = Query(None, description="Filter created_at >= YYYY-MM-DD"),
-    date_to:   Optional[str] = Query(None, description="Filter created_at <= YYYY-MM-DD"),
-    page:      int           = Query(1,   ge=1),
-    per_page:  int           = Query(100, ge=1, le=500),
+    category:       Optional[str] = Query(None,  description="Filter by industry category"),
+    search:         Optional[str] = Query(None,  description="Search across company_name, email, phones, founder_name"),
+    status:         Optional[str] = Query(None,  description="Filter by status: new|interested|not_interested"),
+    tab:            Optional[str] = Query(None,  description="Smart tab: new_leads|old_untouched|interested|not_interested|follow_ups|all"),
+    date_from:      Optional[str] = Query(None,  description="Filter created_at >= YYYY-MM-DD"),
+    date_to:        Optional[str] = Query(None,  description="Filter created_at <= YYYY-MM-DD"),
+    all_categories: bool          = Query(False, description="Fan out across ALL category collections and return combined results with by_category breakdown"),
+    page:           int           = Query(1,     ge=1),
+    per_page:       int           = Query(100,   ge=1, le=500),
 ):
     """
     Fetch stored leads from MongoDB with server-side filtering.
-    Delegates filter building to _build_leads_filter().
+
+    When all_categories=true (and no specific category is given), fans out
+    across ALL known category collections concurrently and returns a merged
+    result sorted by created_at desc, with a by_category breakdown.
     """
-    db        = get_db()
+    import asyncio as _asyncio
+
+    db           = get_db()
+    mongo_filter = _build_leads_filter(tab, status, search, date_from, date_to)
+
+    def _serialize_doc(doc: dict, cat_label: str = "") -> dict:
+        doc["id"] = str(doc.pop("_id"))
+        for ts_field in ("created_at", "updated_at"):
+            if isinstance(doc.get(ts_field), datetime):
+                doc[ts_field] = doc[ts_field].isoformat()
+        if cat_label and not doc.get("category"):
+            doc["category"] = cat_label
+        return doc
+
+    # ── All-categories fan-out path ───────────────────────────────────────────
+    if all_categories and not category:
+        # Discover every known category collection
+        try:
+            cats_coll  = db[CATEGORIES_COLLECTION]
+            cat_cursor = cats_coll.find({}, {"name": 1, "collection": 1, "_id": 0})
+            cat_docs   = await cat_cursor.to_list(length=500)
+        except Exception:
+            cat_docs = []
+
+        # Build deduplicated map: collection_name → display label
+        coll_map: dict[str, str] = {}
+        if cat_docs:
+            for cd in cat_docs:
+                cname = cd.get("collection") or collection_for_category(cd.get("name", ""))
+                label = cd.get("name") or cname
+                if cname:
+                    coll_map[cname] = label
+        if not coll_map:
+            for cat_name in ALL_CATEGORIES:
+                coll_map[collection_for_category(cat_name)] = cat_name
+
+        async def _query_cat(coll_name: str, cat_label: str):
+            try:
+                coll  = db[coll_name]
+                total = await coll.count_documents(mongo_filter)
+                if total == 0:
+                    return cat_label, 0, []
+                # Fetch enough per category so pagination across all still works
+                cursor = coll.find(mongo_filter).sort("created_at", -1).limit(per_page * page)
+                docs   = await cursor.to_list(length=per_page * page)
+                return cat_label, total, [_serialize_doc(d, cat_label) for d in docs]
+            except Exception:
+                return cat_label, 0, []
+
+        gathered = await _asyncio.gather(
+            *[_query_cat(cn, lbl) for cn, lbl in coll_map.items()]
+        )
+
+        by_category: list[dict] = []
+        all_leads:   list[dict] = []
+        grand_total = 0
+
+        for cat_label, count, docs in gathered:
+            if count > 0:
+                by_category.append({"category": cat_label, "count": count})
+                grand_total += count
+                all_leads.extend(docs)
+
+        # Sort all leads newest-first and paginate
+        all_leads.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+        skip      = (page - 1) * per_page
+        page_docs = all_leads[skip: skip + per_page]
+
+        by_category.sort(key=lambda x: x["count"], reverse=True)
+
+        return MongoLeadsResponse(
+            success=True,
+            inserted=0,
+            updated=0,
+            total=grand_total,
+            query="all_categories",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            leads=page_docs,
+            by_category=by_category,
+        )
+
+    # ── Single-category (or legacy) path ─────────────────────────────────────
     coll_name = collection_for_category(category) if category else COLLECTION_NAME
     coll      = db[coll_name]
-
-    mongo_filter = _build_leads_filter(tab, status, search, date_from, date_to)
 
     total   = await coll.count_documents(mongo_filter)
     skip    = (page - 1) * per_page
     cursor  = coll.find(mongo_filter).sort("created_at", -1).skip(skip).limit(per_page)
     db_docs = await cursor.to_list(length=per_page)
 
-    leads_out = []
-    for doc in db_docs:
-        doc["id"] = str(doc.pop("_id"))
-        for ts_field in ("created_at", "updated_at"):
-            if isinstance(doc.get(ts_field), datetime):
-                doc[ts_field] = doc[ts_field].isoformat()
-        leads_out.append(doc)
+    leads_out = [_serialize_doc(doc) for doc in db_docs]
 
     return MongoLeadsResponse(
         success=True,
@@ -1036,27 +1163,21 @@ async def get_leads(
     tags=["Leads"],
 )
 async def get_status_counts(
-    category: Optional[str] = Query(None, description="Industry category — routes to correct collection"),
+    category:       Optional[str] = Query(None,  description="Industry category — routes to correct collection"),
+    all_categories: bool          = Query(False, description="Sum counts across ALL category collections"),
 ):
     """
     Returns MongoDB counts for all tab views:
       { new: N, old_untouched: N, interested: N, not_interested: N,
         follow_ups: N, total: N }
 
-    new_leads     = status in [null/"new"] AND created_at >= now-2d
-    old_untouched = status in [null/"new"] AND created_at <  now-2d
-    interested    = status == "interested"
-    not_interested= status == "not_interested"
-    follow_ups    = follow_up_date is set (not null/empty)
-    total         = all documents
+    When all_categories=true fans out across every known leads_* collection
+    and sums the counts so the tab badges reflect the full database.
     """
+    import asyncio as _asyncio
     from datetime import timedelta
 
     db        = get_db()
-    coll_name = collection_for_category(category) if category else COLLECTION_NAME
-    coll      = db[coll_name]
-
-    # Use a real datetime object — never an ISO string — for BSON Date comparison
     cutoff_2d = datetime.now(timezone.utc) - timedelta(days=2)
 
     new_status_filter = {"$or": [
@@ -1065,25 +1186,60 @@ async def get_status_counts(
         {"status": None},
     ]}
 
-    # Run all counts in parallel-ish (sequential awaits, all fast index hits)
-    total            = await coll.count_documents({})
-    interested       = await coll.count_documents({"status": "interested"})
-    not_interested   = await coll.count_documents({"status": "not_interested"})
-    new_leads        = await coll.count_documents({"$and": [new_status_filter, {"created_at": {"$gte": cutoff_2d}}]})
-    old_untouched    = await coll.count_documents({"$and": [new_status_filter, {"created_at": {"$lt":  cutoff_2d}}]})
-    follow_ups       = await coll.count_documents({"follow_up_date": {"$nin": [None, ""]}})
+    async def _counts_for_coll(coll_name: str) -> dict:
+        coll = db[coll_name]
+        try:
+            results = await _asyncio.gather(
+                coll.count_documents({}),
+                coll.count_documents({"status": "interested"}),
+                coll.count_documents({"status": "not_interested"}),
+                coll.count_documents({"$and": [new_status_filter, {"created_at": {"$gte": cutoff_2d}}]}),
+                coll.count_documents({"$and": [new_status_filter, {"created_at": {"$lt":  cutoff_2d}}]}),
+                coll.count_documents({"follow_up_date": {"$nin": [None, ""]}}),
+                return_exceptions=True,
+            )
+            def _safe(v, default=0):
+                return v if isinstance(v, int) else default
+            return {
+                "total":          _safe(results[0]),
+                "interested":     _safe(results[1]),
+                "not_interested": _safe(results[2]),
+                "new":            _safe(results[3]),
+                "old_untouched":  _safe(results[4]),
+                "follow_ups":     _safe(results[5]),
+            }
+        except Exception:
+            return {"total": 0, "interested": 0, "not_interested": 0,
+                    "new": 0, "old_untouched": 0, "follow_ups": 0}
+
+    if all_categories and not category:
+        # Discover every known category collection
+        try:
+            cats_cursor = db[CATEGORIES_COLLECTION].find({}, {"collection": 1, "_id": 0})
+            cats_docs   = await cats_cursor.to_list(length=500)
+            coll_names  = list({d["collection"] for d in cats_docs if d.get("collection")})
+        except Exception:
+            coll_names = []
+        if not coll_names:
+            coll_names = [collection_for_category(c) for c in ALL_CATEGORIES]
+
+        gathered = await _asyncio.gather(*[_counts_for_coll(cn) for cn in coll_names])
+        totals   = {"total": 0, "interested": 0, "not_interested": 0,
+                    "new": 0, "old_untouched": 0, "follow_ups": 0}
+        for c in gathered:
+            for key in totals:
+                totals[key] += c[key]
+
+        return {"success": True, "category": None, "all_categories": True, "counts": totals}
+
+    # Single-collection path
+    coll_name = collection_for_category(category) if category else COLLECTION_NAME
+    counts    = await _counts_for_coll(coll_name)
 
     return {
-        "success": True,
+        "success":  True,
         "category": category,
-        "counts": {
-            "new":           new_leads,
-            "old_untouched": old_untouched,
-            "interested":    interested,
-            "not_interested": not_interested,
-            "follow_ups":    follow_ups,
-            "total":         total,
-        },
+        "counts":   counts,
     }
 
 
@@ -1135,11 +1291,13 @@ async def get_follow_ups(
         if not colls:
             colls = [COLLECTION_NAME]
 
-    # Projection — include founder_name and company_number for richer notifications
+    # Projection — include founder_name, company_number and all follow-up fields
     projection = {
         "company_name": 1, "founder_name": 1,
         "email": 1, "company_number": 1, "founder_number": 1,
-        "follow_up_date": 1, "follow_up_completed": 1,
+        "follow_up_date": 1, "follow_up_time": 1,
+        "follow_up_method": 1, "follow_up_action": 1,
+        "follow_up_completed": 1,
         "status": 1, "category": 1, "_id": 1,
     }
 
@@ -1267,8 +1425,11 @@ class _NoteBody(_StatusBodyBase):
 
 
 class _FollowUpBody(_StatusBodyBase):
-    follow_up_date: Optional[str] = None   # ISO date string "YYYY-MM-DD" or null to clear
-    category:       Optional[str] = None
+    follow_up_date:   Optional[str] = None   # ISO date string "YYYY-MM-DD" or null to clear
+    follow_up_time:   Optional[str] = None   # "HH:MM" or null
+    follow_up_method: Optional[str] = None   # "Call" | "Email" | "WhatsApp" | "Meeting"
+    follow_up_action: Optional[str] = None   # "Call client" | "Send proposal" | etc.
+    category:         Optional[str] = None
 
 
 class _FollowUpCompleteBody(_StatusBodyBase):
@@ -1470,6 +1631,10 @@ async def update_follow_up(lead_id: str, payload: _FollowUpBody):
     if fud and not _re.match(r'^\d{4}-\d{2}-\d{2}$', fud):
         raise HTTPException(status_code=422, detail="follow_up_date must be YYYY-MM-DD or null.")
 
+    fut  = (payload.follow_up_time   or "").strip() or None
+    fum  = (payload.follow_up_method or "").strip() or None
+    fua  = (payload.follow_up_action or "").strip() or None
+
     db  = get_db()
     now = datetime.now(timezone.utc)
 
@@ -1485,7 +1650,13 @@ async def update_follow_up(lead_id: str, payload: _FollowUpBody):
         flt  = {"_id": oid} if oid else {"id": lead_id}
         result = await coll.update_one(
             flt,
-            {"$set": {"follow_up_date": fud, "updated_at": now}},
+            {"$set": {
+                "follow_up_date":   fud,
+                "follow_up_time":   fut,
+                "follow_up_method": fum,
+                "follow_up_action": fua,
+                "updated_at":       now,
+            }},
         )
         if result.matched_count > 0:
             return await coll.find_one(flt)
@@ -1512,7 +1683,8 @@ async def update_follow_up(lead_id: str, payload: _FollowUpBody):
         if isinstance(doc.get(ts), datetime):
             doc[ts] = doc[ts].isoformat()
 
-    return {"success": True, "follow_up_date": fud, "lead": doc}
+    return {"success": True, "follow_up_date": fud, "follow_up_time": fut,
+            "follow_up_method": fum, "follow_up_action": fua, "lead": doc}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

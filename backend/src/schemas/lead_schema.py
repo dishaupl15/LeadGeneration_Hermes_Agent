@@ -330,7 +330,7 @@ class MongoLeadDoc(BaseModel):
 
 class MongoLeadsResponse(BaseModel):
     """
-    Response returned by POST /leads/generate-leads.
+    Response returned by POST /leads/generate-leads and GET /leads.
 
     Contains documents fetched directly from MongoDB after the upsert —
     NOT the raw Hermes output. The frontend always displays this data.
@@ -343,6 +343,12 @@ class MongoLeadsResponse(BaseModel):
     query:     str              = Field(..., example="Real estate companies in Pune")
     timestamp: str              = Field(..., example="2026-08-06T12:00:00+00:00")
     leads:     list[MongoLeadDoc] = Field(default_factory=list)
+
+    # Present when all_categories=true — per-category lead counts
+    by_category: Optional[list] = Field(
+        default=None,
+        description="Per-category counts [{category, count}] when all_categories=true",
+    )
 
     # Pipeline statistics exposed for audit tooling
     # Shape: {serper_calls, firecrawl_calls, hunter_calls, apollo_calls,
