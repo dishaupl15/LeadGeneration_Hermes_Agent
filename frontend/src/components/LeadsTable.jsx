@@ -2,6 +2,7 @@ import { useState } from 'react'
 import EmptyState from './EmptyState'
 import PDLContactsPanel from './PDLContactsPanel'
 import LeadDetailPanel from './LeadDetailPanel'
+import FollowUpModal from './FollowUpModal'
 import { usePDLSearch } from '../hooks/usePDLSearch'
 import { updateLeadStatus } from '../services/api'
 
@@ -358,8 +359,8 @@ function SortIcon({ dir }) {
    SKELETON ROW (loading state)
    ════════════════════════════════════════════════════════════════════ */
 function SkeletonRow({ index }) {
-  // 11 columns: #, Company, Email, Founder, Phone, Address, Source, Verified, Status, Website, Contacts
-  const ws = ['w-5','w-44','w-44','w-28','w-28','w-44','w-32','w-24','w-36','w-32','w-24']
+  // 13 columns: #, Company, Email, Founder, Phone, Address, Source, Verified, Status, Website, Contacts, Details, Follow-up
+  const ws = ['w-5','w-44','w-44','w-28','w-28','w-44','w-32','w-24','w-36','w-32','w-24','w-20','w-36']
   return (
     <tr className={index % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}>
       {ws.map((w, i) => (
@@ -368,6 +369,95 @@ function SkeletonRow({ index }) {
         </td>
       ))}
     </tr>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   FOLLOW-UP CELL — compact display + edit trigger
+   ════════════════════════════════════════════════════════════════════ */
+
+const METHOD_ICONS = { Call: '📞', Email: '✉️', WhatsApp: '💬', Meeting: '🤝' }
+
+function FollowUpCell({ lead, onEdit }) {
+  const date   = lead.follow_up_date   || null
+  const time   = lead.follow_up_time   || null
+  const method = lead.follow_up_method || null
+  const action = lead.follow_up_action || null
+
+  if (!date && !method && !action) {
+    return (
+      <button
+        onClick={() => onEdit(lead)}
+        title="Add follow-up"
+        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg
+                   border border-dashed border-slate-300 text-[11px] font-semibold
+                   text-slate-400 hover:border-indigo-400 hover:text-indigo-600
+                   hover:bg-indigo-50 transition-all
+                   focus:outline-none focus:ring-2 focus:ring-indigo-400"
+      >
+        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+            d="M12 4v16m8-8H4"/>
+        </svg>
+        Add Follow-up
+      </button>
+    )
+  }
+
+  // Determine urgency colour for date
+  let dateCls = 'text-indigo-700 font-semibold'
+  if (date) {
+    const today = new Date().toISOString().split('T')[0]
+    if (date < today) dateCls = 'text-rose-600 font-bold'
+    else if (date === today) dateCls = 'text-amber-600 font-bold'
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5 min-w-[145px]">
+      {/* Date + time */}
+      {date && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className={`text-xs ${dateCls}`}>📅 {date}</span>
+          {time && <span className="text-xs text-slate-500">⏰ {time}</span>}
+        </div>
+      )}
+
+      {/* Method + Action badges */}
+      <div className="flex flex-wrap items-center gap-1">
+        {method && (
+          <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full
+                           bg-indigo-50 border border-indigo-200 text-indigo-700
+                           text-[10px] font-semibold">
+            {METHOD_ICONS[method] || '•'} {method}
+          </span>
+        )}
+        {action && (
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full
+                           bg-amber-50 border border-amber-200 text-amber-700
+                           text-[10px] font-semibold">
+            {action}
+          </span>
+        )}
+      </div>
+
+      {/* Edit / Clear buttons */}
+      <div className="flex items-center gap-1.5 mt-0.5">
+        <button
+          onClick={() => onEdit(lead)}
+          title="Edit follow-up"
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px]
+                     font-semibold text-slate-500 border border-slate-200 bg-white
+                     hover:bg-slate-50 hover:text-indigo-600 hover:border-indigo-300
+                     transition-colors focus:outline-none focus:ring-1 focus:ring-indigo-400"
+        >
+          <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+          </svg>
+          Edit
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -388,7 +478,7 @@ function SkeletonRow({ index }) {
     10.  website         (clickable link, shown last)
     11.  contacts        (PDL "Find Contacts" button)
    ════════════════════════════════════════════════════════════════════ */
-function LeadRow({ lead, index, onFindContacts, onOpenDetail, status, onStatusUpdate }) {
+function LeadRow({ lead, index, onFindContacts, onOpenDetail, onEditFollowUp, status, onStatusUpdate }) {
   // ── Resolve all fields with fallbacks ──────────────────────────
   const email         = resolveEmail(lead)
   const phone         = resolvePhone(lead)
@@ -620,6 +710,11 @@ function LeadRow({ lead, index, onFindContacts, onOpenDetail, status, onStatusUp
           }
         </button>
       </td>
+
+      {/* 13. Follow-up */}
+      <td className="px-4 py-3.5">
+        <FollowUpCell lead={lead} onEdit={onEditFollowUp} />
+      </td>
     </tr>
   )
 }
@@ -640,6 +735,7 @@ const HEADERS = [
   { label: 'Website',         sortable: false },
   { label: 'Contacts',        sortable: false },
   { label: 'Details',         sortable: false },
+  { label: 'Follow-up',       sortable: false },
 ]
 
 /* ════════════════════════════════════════════════════════════════════
@@ -664,13 +760,22 @@ export default function LeadsTable({
   // Detail panel state (notes + follow-up)
   const [detailLead, setDetailLead] = useState(null)
 
+  // Follow-up modal state
+  const [followUpLead, setFollowUpLead] = useState(null)
+
   const [statusMap, setStatusMap] = useState({})
+
+  // localLeads: local overrides for follow-up fields after modal save
+  const [localLeadMap, setLocalLeadMap] = useState({})
 
   const handleFindContacts = (lead) => setActiveLead(lead)
   const handleClosePDL     = () => { setActiveLead(null); pdlHook.clear() }
 
   const handleOpenDetail  = (lead) => setDetailLead(lead)
   const handleCloseDetail = () => setDetailLead(null)
+
+  const handleEditFollowUp  = (lead) => setFollowUpLead(lead)
+  const handleCloseFollowUp = () => setFollowUpLead(null)
 
   const handleStatusUpdate = (leadId, newStatus, updatedLead) => {
     setStatusMap(prev => ({ ...prev, [leadId]: newStatus }))
@@ -680,7 +785,21 @@ export default function LeadsTable({
   // Called from LeadDetailPanel after notes/follow-up saved
   const handleLeadUpdate = (updatedDoc) => {
     if (detailLead) setDetailLead(updatedDoc)
+    const key = updatedDoc.id ?? updatedDoc._id
+    if (key) setLocalLeadMap(prev => ({ ...prev, [key]: updatedDoc }))
     if (onLeadUpdate) onLeadUpdate(updatedDoc)
+  }
+
+  // Called from FollowUpModal after follow-up saved
+  const handleFollowUpSaved = (updatedDoc) => {
+    const key = updatedDoc.id ?? updatedDoc._id
+    if (key) setLocalLeadMap(prev => ({ ...prev, [key]: updatedDoc }))
+    if (onLeadUpdate) onLeadUpdate(updatedDoc)
+    // If detail panel is open for this lead, sync it
+    if (detailLead && (detailLead.id ?? detailLead._id) === key) {
+      setDetailLead(updatedDoc)
+    }
+    setFollowUpLead(null)
   }
 
   // Resolve effective status: prefer local override, then lead.status, default "new"
@@ -689,11 +808,20 @@ export default function LeadsTable({
     return statusMap[key] ?? lead.status ?? 'new'
   }
 
+  // Merge local follow-up overrides into the lead before rendering
+  const mergeLead = (lead) => {
+    const key = lead.id ?? lead._id
+    if (!key) return lead
+    const override = localLeadMap[key]
+    if (!override) return lead
+    return { ...lead, ...override }
+  }
+
   return (
     <>
       <div className="overflow-hidden rounded-xl border border-slate-200">
         <div className="overflow-x-auto scrollbar-thin">
-          <table className="w-full text-left" style={{ minWidth: '1500px' }}>
+          <table className="w-full text-left" style={{ minWidth: '1700px' }}>
 
             {/* ── HEADER ─────────────────────────────────────────────── */}
             <thead>
@@ -728,10 +856,11 @@ export default function LeadsTable({
                 : leads.map((lead, i) => (
                     <LeadRow
                       key={lead.id ?? `${lead.company_name}-${i}`}
-                      lead={lead}
+                      lead={mergeLead(lead)}
                       index={i}
                       onFindContacts={handleFindContacts}
                       onOpenDetail={handleOpenDetail}
+                      onEditFollowUp={handleEditFollowUp}
                       status={getStatus(lead)}
                       onStatusUpdate={handleStatusUpdate}
                     />
@@ -786,6 +915,15 @@ export default function LeadsTable({
           lead={detailLead}
           onClose={handleCloseDetail}
           onLeadUpdate={handleLeadUpdate}
+        />
+      )}
+
+      {/* Follow-up Modal */}
+      {followUpLead && (
+        <FollowUpModal
+          lead={followUpLead}
+          onClose={handleCloseFollowUp}
+          onSaved={handleFollowUpSaved}
         />
       )}
     </>

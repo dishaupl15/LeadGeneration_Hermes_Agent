@@ -1289,6 +1289,20 @@ export default function LeadGeneration() {
                 category={selectedCategory}
                 refreshTick={refreshTick}
                 onOpenPanel={() => setShowFollowUps(true)}
+                onNavigateLead={(lead) => {
+                  // Switch CRM explorer to that lead's category + follow_ups tab
+                  setCrmFilter({
+                    category: lead.category || null,
+                    dateFrom: '',
+                    dateTo:   '',
+                    tab:      'follow_ups',
+                  })
+                  // Scroll to the CRM leads explorer
+                  setTimeout(() => {
+                    const el = document.getElementById('crm-leads-explorer')
+                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                  }, 80)
+                }}
               />
               <button
                 onClick={() => setShowFollowUps(true)}

@@ -11,20 +11,26 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { CATEGORIES } from '../config/categories'
+import { BRAND } from '../config/brandConfig'
 import {
   createForm, listForms, getFormDetail,
   updateForm, deleteForm, createCampaign, listSubmissions,
+  submitPublicForm,
 } from '../services/api'
 
-const BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') || 'http://localhost:8002'
+const BASE_URL = (() => {
+  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL.replace(/\/$/, '')
+  if (typeof window !== 'undefined') return `${window.location.protocol}//${window.location.hostname}:8002`
+  return 'http://localhost:8002'
+})()
 
 // Public form base URL — where the FRONTEND is hosted (used for shareable links).
-// In production this must be set to your deployed frontend domain, e.g.:
-//   VITE_PUBLIC_FORM_BASE_URL=https://yourapp.vercel.app
-// Falls back to window.location.origin so local dev works without any config.
+// Auto-follows the hostname the user is on, so links work from localhost AND
+// from the LAN IP without any .env change.
+// Override with VITE_PUBLIC_FORM_BASE_URL for production deployments.
 const FRONTEND_BASE = (
   import.meta.env.VITE_PUBLIC_FORM_BASE_URL?.replace(/\/$/, '') ||
-  window.location.origin
+  (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173')
 )
 
 const QUESTION_TYPES = [
@@ -50,6 +56,16 @@ const PLATFORMS = [
 /* ── tiny helpers ──────────────────────────────────────────────────────────── */
 function uid() { return 'q_' + Math.random().toString(36).slice(2, 10) }
 
+/* ── Default fields pre-populated on every NEW form ───────────────────────── */
+function defaultQuestions() {
+  return [
+    { question_id: uid(), label: 'Full Name',     type: 'short_text', required: true,  options: [], display_order: 0, placeholder: 'Enter your full name' },
+    { question_id: uid(), label: 'Email',         type: 'email',      required: true,  options: [], display_order: 1, placeholder: 'Enter your email address' },
+    { question_id: uid(), label: 'Phone Number',  type: 'phone',      required: false, options: [], display_order: 2, placeholder: 'Enter your phone number' },
+    { question_id: uid(), label: 'Company Name',  type: 'short_text', required: false, options: [], display_order: 3, placeholder: 'Enter your company name' },
+  ]
+}
+
 function fmtDate(iso) {
   if (!iso) return '—'
   try { return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }).format(new Date(iso)) }
@@ -72,6 +88,369 @@ function CopyBtn({ text }) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
+   FORM PREVIEW MODAL
+   Renders the public form UI inline — no external URL / network navigation.
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* ── tiny icons (inline SVG, no deps) ─────────────────────────────────────── */
+const _ic = 'w-[14px] h-[14px] flex-shrink-0'
+const GlobeIcon    = () => <svg className={_ic} fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9"/></svg>
+const MailIcon     = () => <svg className={_ic} fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+const PinIcon      = () => <svg className={_ic} fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a2 2 0 01-2.828 0l-4.243-4.243a8 8 0 1111.314 0z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+const LinkedInIcon = () => <svg className={_ic} fill="currentColor" viewBox="0 0 24 24"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+
+function PreviewFormField({ question, value, onChange, error }) {
+  const { label, type, required, options, placeholder } = question
+  const fieldId = `preview-${question.question_id}`
+  const baseClass = [
+    'w-full rounded-md border px-4 py-3 text-[14px] text-slate-800',
+    'placeholder-slate-400 bg-white outline-none transition-all duration-150',
+    'focus:ring-2 focus:ring-offset-0',
+    error
+      ? 'border-rose-300 focus:ring-rose-100 bg-rose-50/40'
+      : 'border-slate-300 hover:border-slate-400 focus:border-slate-500 focus:ring-slate-100',
+  ].join(' ')
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={fieldId} className="text-[13px] font-medium text-slate-700 leading-none">
+        {label}
+        {required && <span className="text-rose-500 ml-1" aria-label="required">*</span>}
+      </label>
+
+      {type === 'short_text' && (
+        <input id={fieldId} type="text" value={value || ''} onChange={e => onChange(e.target.value)}
+          placeholder={placeholder || ''} className={baseClass} autoComplete="off" />
+      )}
+      {type === 'email' && (
+        <input id={fieldId} type="email" value={value || ''} onChange={e => onChange(e.target.value)}
+          placeholder={placeholder || 'you@company.com'} className={baseClass} autoComplete="email" />
+      )}
+      {type === 'phone' && (
+        <input id={fieldId} type="tel" value={value || ''} onChange={e => onChange(e.target.value)}
+          placeholder={placeholder || '+91 98765 43210'} className={baseClass} autoComplete="tel" />
+      )}
+      {type === 'number' && (
+        <input id={fieldId} type="number" value={value || ''} onChange={e => onChange(e.target.value)}
+          placeholder={placeholder || ''} className={baseClass} />
+      )}
+      {type === 'long_text' && (
+        <textarea id={fieldId} value={value || ''} onChange={e => onChange(e.target.value)}
+          placeholder={placeholder || ''} rows={4}
+          className={`${baseClass} resize-none leading-relaxed`} />
+      )}
+      {type === 'dropdown' && (
+        <div className="relative">
+          <select id={fieldId} value={value || ''} onChange={e => onChange(e.target.value)}
+            className={`${baseClass} pr-10 appearance-none cursor-pointer`}>
+            <option value="">Select an option</option>
+            {(options || []).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <div className="pointer-events-none absolute inset-y-0 right-3 flex items-center">
+            <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7"/>
+            </svg>
+          </div>
+        </div>
+      )}
+      {type === 'radio' && (
+        <div className="flex flex-col gap-2.5 mt-0.5">
+          {(options || []).map(o => (
+            <label key={o.value} className="flex items-center gap-3 cursor-pointer group select-none">
+              <input type="radio" name={fieldId} value={o.value}
+                checked={value === o.value} onChange={() => onChange(o.value)}
+                className="w-4 h-4 border-slate-300 text-slate-900 focus:ring-slate-300 cursor-pointer" />
+              <span className="text-[14px] text-slate-700 group-hover:text-slate-900 transition-colors">{o.label}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      {type === 'checkbox' && (
+        <div className="flex flex-col gap-2.5 mt-0.5">
+          {(options || []).map(o => {
+            const checked = Array.isArray(value) ? value.includes(o.value) : false
+            const toggle  = () => {
+              const cur = Array.isArray(value) ? value : []
+              onChange(checked ? cur.filter(v => v !== o.value) : [...cur, o.value])
+            }
+            return (
+              <label key={o.value} className="flex items-center gap-3 cursor-pointer group select-none">
+                <input type="checkbox" checked={checked} onChange={toggle}
+                  className="w-4 h-4 rounded border-slate-300 text-slate-900 focus:ring-slate-300 cursor-pointer" />
+                <span className="text-[14px] text-slate-700 group-hover:text-slate-900 transition-colors">{o.label}</span>
+              </label>
+            )
+          })}
+        </div>
+      )}
+
+      {error && (
+        <p role="alert" className="flex items-center gap-1.5 text-[12px] text-rose-600 mt-0.5">
+          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function FormPreviewModal({ form, formId, onClose }) {
+  const [answers,    setAnswers]    = useState({})
+  const [errors,     setErrors]     = useState({})
+  const [submitting, setSubmitting] = useState(false)
+  const [submitted,  setSubmitted]  = useState(false)
+  const [submitErr,  setSubmitErr]  = useState(null)
+
+  // Close on Escape key
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  // Prevent body scroll while open
+  useEffect(() => {
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = '' }
+  }, [])
+
+  const setAnswer = (qid, val) => {
+    setAnswers(prev => ({ ...prev, [qid]: val }))
+    setErrors(prev => { const e = { ...prev }; delete e[qid]; return e })
+  }
+
+  const validate = () => {
+    const errs = {}
+    for (const q of (form?.questions || [])) {
+      const val = answers[q.question_id]
+      if (q.required) {
+        const empty = val === undefined || val === null || val === '' ||
+          (Array.isArray(val) && val.length === 0)
+        if (empty) errs[q.question_id] = `${q.label} is required`
+      }
+      if (q.type === 'email' && val) {
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(val).trim()))
+          errs[q.question_id] = 'Please enter a valid email address'
+      }
+    }
+    setErrors(errs)
+    return Object.keys(errs).length === 0
+  }
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    setSubmitErr(null)
+    if (!validate()) return
+    const answerList = Object.entries(answers)
+      .filter(([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0))
+      .map(([question_id, value]) => ({ question_id, value }))
+    setSubmitting(true)
+    try {
+      await submitPublicForm(formId, { answers: answerList, source: 'preview', campaign_id: null })
+      setSubmitted(true)
+    } catch (err) {
+      setSubmitErr(err.message || 'Something went wrong. Please try again.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const sortedQuestions = [...(form.questions || [])].sort((a, b) => a.display_order - b.display_order)
+  const hasRequired = sortedQuestions.some(q => q.required)
+
+  return (
+    /* Backdrop */
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center
+                 bg-black/50 backdrop-blur-sm overflow-y-auto py-8 px-4"
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+    >
+      {/* Modal card */}
+      <div className="relative w-full max-w-[600px] bg-transparent">
+
+        {/* Close button — floats above the card */}
+        <button
+          onClick={onClose}
+          aria-label="Close preview"
+          className="absolute -top-4 -right-2 z-10 w-9 h-9 flex items-center justify-center
+                     rounded-full bg-white shadow-lg border border-slate-200
+                     text-slate-500 hover:text-slate-800 hover:bg-slate-50 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+
+        {/* ── Preview label ─────────────────────────────────────────────── */}
+        <div className="flex items-center justify-center mb-3">
+          <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold
+                           bg-amber-50 border border-amber-200 text-amber-700
+                           px-3 py-1 rounded-full select-none">
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+            </svg>
+            Form Preview
+          </span>
+        </div>
+
+        {/* ── Form card ─────────────────────────────────────────────────── */}
+        <div className="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
+
+          {/* Accent bar */}
+          <div className="h-[3px] w-full bg-slate-900" />
+
+          {/* Company header */}
+          <div className="flex flex-col items-center text-center px-8 pt-10 pb-8 bg-white">
+            <a href={BRAND.website || '#'} target="_blank" rel="noopener noreferrer"
+              className="inline-block mb-5 rounded-lg p-1 ring-2 ring-transparent hover:ring-slate-100 transition-all">
+              <img src={BRAND.logoSrc} alt={BRAND.logoAlt}
+                style={{ maxHeight: BRAND.logoMaxH, width: 'auto', maxWidth: 200 }}
+                className="object-contain block select-none"
+                draggable="false"
+                onError={e => { e.currentTarget.style.display = 'none' }} />
+            </a>
+            <h2 className="text-[15px] font-bold text-slate-900 leading-tight tracking-tight">{BRAND.name}</h2>
+            {BRAND.tagline && <p className="mt-1.5 text-[13px] text-slate-500 leading-snug">{BRAND.tagline}</p>}
+            {BRAND.description && (
+              <p className="mt-3 text-[13px] text-slate-500 leading-relaxed max-w-sm">{BRAND.description}</p>
+            )}
+            <div className="mt-5 flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
+              {BRAND.website && (
+                <a href={BRAND.website} target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-[12px] text-slate-500 hover:text-slate-800 transition-colors">
+                  <GlobeIcon />{BRAND.website.replace(/^https?:\/\//, '')}
+                </a>
+              )}
+              {BRAND.contactEmail && (
+                <a href={`mailto:${BRAND.contactEmail}`}
+                  className="inline-flex items-center gap-1.5 text-[12px] text-slate-500 hover:text-slate-800 transition-colors">
+                  <MailIcon />{BRAND.contactEmail}
+                </a>
+              )}
+              {BRAND.location && (
+                <span className="inline-flex items-center gap-1.5 text-[12px] text-slate-400 select-none">
+                  <PinIcon />{BRAND.location}
+                </span>
+              )}
+              {BRAND.linkedin && (
+                <a href={BRAND.linkedin} target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-[12px] text-slate-500 hover:text-[#0A66C2] transition-colors">
+                  <LinkedInIcon />LinkedIn
+                </a>
+              )}
+            </div>
+          </div>
+
+          <div className="h-px bg-slate-200" />
+
+          {/* Form header */}
+          <div className="px-8 pt-8 pb-6">
+            <h1 className="text-[24px] font-bold text-slate-900 leading-tight">{form.name}</h1>
+            {form.category && (
+              <p className="mt-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-widest">{form.category}</p>
+            )}
+            <p className="mt-3 text-[14px] text-slate-500 leading-relaxed">
+              {form.description || 'Please complete the form below and our team will be in touch with you regarding your enquiry.'}
+            </p>
+            {hasRequired && (
+              <p className="mt-3 text-[12.5px] text-slate-400">
+                Fields marked <span className="text-rose-500 font-semibold">*</span> are required.
+              </p>
+            )}
+          </div>
+
+          <div className="h-px bg-slate-100" />
+
+          {/* Form body */}
+          {submitted ? (
+            <div className="px-8 py-12 flex flex-col items-center text-center">
+              <svg className="w-12 h-12 text-emerald-500 mb-4" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+              <h3 className="text-[20px] font-bold text-slate-900">Response Received</h3>
+              <p className="mt-3 text-[14px] text-slate-500 leading-relaxed max-w-xs">
+                Thank you. Our team will be in touch shortly.
+              </p>
+              <button onClick={onClose}
+                className="mt-6 px-6 py-2.5 rounded-lg bg-slate-900 text-white text-sm font-semibold
+                           hover:bg-slate-800 transition-colors">
+                Close
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="px-8 py-8" noValidate>
+              {submitErr && (
+                <div role="alert" className="mb-6 flex items-start gap-3 p-4 rounded-lg
+                             bg-rose-50 border border-rose-200 text-[13px] text-rose-700">
+                  <svg className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                  </svg>
+                  <span className="leading-snug">{submitErr}</span>
+                </div>
+              )}
+
+              <div className="space-y-7">
+                {sortedQuestions.map(q => (
+                  <PreviewFormField
+                    key={q.question_id}
+                    question={q}
+                    value={answers[q.question_id]}
+                    onChange={val => setAnswer(q.question_id, val)}
+                    error={errors[q.question_id]}
+                  />
+                ))}
+              </div>
+
+              <button type="submit" disabled={submitting}
+                className={[
+                  'mt-9 w-full py-3.5 px-6 rounded-lg',
+                  'text-[14px] font-semibold text-white',
+                  'flex items-center justify-center gap-2.5',
+                  'bg-slate-900 hover:bg-slate-800 active:bg-slate-950',
+                  'transition-all duration-150 shadow-sm hover:shadow-md',
+                  'focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-700',
+                  'disabled:opacity-50 disabled:cursor-not-allowed',
+                ].join(' ')}>
+                {submitting
+                  ? <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+                    </svg> Submitting…</>
+                  : <><span>Submit Enquiry</span>
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3"/>
+                    </svg></>
+                }
+              </button>
+
+              <div className="mt-7 pt-6 border-t border-slate-100">
+                <p className="text-[12px] text-slate-400 text-center leading-relaxed">
+                  Your information will only be used for the purpose described in this form
+                  and will not be shared with third parties.
+                </p>
+              </div>
+            </form>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
+          <span>© {new Date().getFullYear()} <a href={BRAND.website || '#'} target="_blank" rel="noopener noreferrer"
+            className="hover:text-slate-600 transition-colors">{BRAND.name}</a></span>
+          {BRAND.contactEmail && (
+            <><span aria-hidden="true">·</span>
+            <a href={`mailto:${BRAND.contactEmail}`} className="hover:text-slate-600 transition-colors">{BRAND.contactEmail}</a></>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
    FORM BUILDER
    ══════════════════════════════════════════════════════════════════════════════ */
 function FormBuilder({ initialData, onSave, onCancel }) {
@@ -83,7 +462,7 @@ function FormBuilder({ initialData, onSave, onCancel }) {
   const [questions,   setQuestions]   = useState(
     initialData?.questions?.length
       ? initialData.questions
-      : [{ question_id: uid(), label: '', type: 'short_text', required: false, options: [], display_order: 0, placeholder: '' }]
+      : defaultQuestions()
   )
   const [saving, setSaving] = useState(false)
   const [error,  setError]  = useState(null)
@@ -389,6 +768,7 @@ function FormDetail({ formId, onBack, onEdit }) {
   const [newCamp, setNewCamp] = useState({ campaign_name: '', platform: 'linkedin' })
   const [addingCamp, setAddingCamp] = useState(false)
   const [showAddCamp, setShowAddCamp] = useState(false)
+  const [showPreview, setShowPreview] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -462,17 +842,27 @@ function FormDetail({ formId, onBack, onEdit }) {
           <p className="text-xs text-slate-400 mt-0.5">{form.category} · {data.submission_count} submission{data.submission_count !== 1 ? 's' : ''}</p>
         </div>
         <div className="flex items-center gap-2">
-          <a href={publicUrl} target="_blank" rel="noopener noreferrer"
+          <button onClick={() => setShowPreview(true)}
             className="btn-secondary px-4 py-2 text-xs gap-1.5">
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
             </svg>
             Open Form
-          </a>
+          </button>
           <button onClick={() => onEdit(form)}
             className="btn-secondary px-4 py-2 text-xs">Edit</button>
         </div>
       </div>
+
+      {/* Form preview modal */}
+      {showPreview && (
+        <FormPreviewModal
+          form={form}
+          formId={formId}
+          onClose={() => setShowPreview(false)}
+        />
+      )}
 
       {/* public URL */}
       <div className="crm-card p-4 mb-5 flex items-center gap-3">

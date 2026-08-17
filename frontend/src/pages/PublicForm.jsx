@@ -3,11 +3,17 @@
  * ──────────────
  * Public-facing branded form page served at  /f/:form_id
  *
- * ● No CRM login required — anyone with the link can fill this form.
- * ● All submission / API / MongoDB logic is UNCHANGED.
- * ● Company branding is centralised in  src/config/brandConfig.js
- *   Edit that file to update the logo, company name, tagline, colours, or privacy URL.
- *   Every generated form inherits those values automatically.
+ * Professional layout matching the design reference:
+ *   - Clean centered card on a soft gray background
+ *   - Company logo + info header block (logo, name, tagline, description, contact row)
+ *   - Thick rule divider
+ *   - Form title block (large bold title + category badge + description + required note)
+ *   - Dynamic form fields — full width, clean labels above inputs
+ *   - Full-width submit button
+ *   - Privacy footer
+ *
+ * To update branding: edit  src/config/brandConfig.js  only.
+ * All submission / validation / API logic is untouched.
  */
 
 import { useState, useEffect } from 'react'
@@ -15,104 +21,152 @@ import { useParams, useSearchParams } from 'react-router-dom'
 import { getPublicForm, submitPublicForm } from '../services/api'
 import { BRAND } from '../config/brandConfig'
 
-/* ── platform source badge metadata ──────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────────────────────
+   Platform source badge metadata
+───────────────────────────────────────────────────────────────────────────── */
 const PLATFORM_LABELS = {
-  linkedin: { label: 'LinkedIn',  color: 'bg-sky-50 text-sky-700 border-sky-200' },
+  linkedin: { label: 'LinkedIn',    color: 'bg-sky-50 text-sky-700 border-sky-200' },
   x:        { label: 'X / Twitter', color: 'bg-slate-50 text-slate-600 border-slate-200' },
-  whatsapp: { label: 'WhatsApp',  color: 'bg-green-50 text-green-700 border-green-200' },
-  facebook: { label: 'Facebook',  color: 'bg-blue-50 text-blue-700 border-blue-200' },
-  website:  { label: 'Website',   color: 'bg-violet-50 text-violet-700 border-violet-200' },
-  other:    { label: 'Other',     color: 'bg-slate-50 text-slate-500 border-slate-200' },
+  whatsapp: { label: 'WhatsApp',    color: 'bg-green-50 text-green-700 border-green-200' },
+  facebook: { label: 'Facebook',    color: 'bg-blue-50 text-blue-700 border-blue-200' },
+  website:  { label: 'Website',     color: 'bg-violet-50 text-violet-700 border-violet-200' },
+  other:    { label: 'Other',       color: 'bg-slate-50 text-slate-500 border-slate-200' },
 }
 
-/* ══════════════════════════════════════════════════════════════════════════════
-   COMPANY HEADER
-   Shown at the top of the card — logo, name, tagline, description, contact row.
-   ══════════════════════════════════════════════════════════════════════════════ */
+/* ─────────────────────────────────────────────────────────────────────────────
+   Tiny SVG icons (inline — no extra deps)
+───────────────────────────────────────────────────────────────────────────── */
+const ic = 'w-[14px] h-[14px] flex-shrink-0'
+
+const GlobeIcon = () => (
+  <svg className={ic} fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round"
+      d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9"/>
+  </svg>
+)
+const MailIcon = () => (
+  <svg className={ic} fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round"
+      d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+  </svg>
+)
+const PinIcon = () => (
+  <svg className={ic} fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round"
+      d="M17.657 16.657L13.414 20.9a2 2 0 01-2.828 0l-4.243-4.243a8 8 0 1111.314 0z"/>
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+  </svg>
+)
+const LinkedInIcon = () => (
+  <svg className={ic} fill="currentColor" viewBox="0 0 24 24">
+    <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+  </svg>
+)
+const ChevronDownIcon = () => (
+  <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7"/>
+  </svg>
+)
+const AlertIcon = () => (
+  <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+  </svg>
+)
+const SpinnerIcon = () => (
+  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+  </svg>
+)
+const ArrowRightIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3"/>
+  </svg>
+)
+const CheckCircleIcon = () => (
+  <svg className="w-12 h-12 text-emerald-500" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+  </svg>
+)
+const ExternalLinkIcon = () => (
+  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+  </svg>
+)
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Company header block — logo, name, tagline, description, contact row
+───────────────────────────────────────────────────────────────────────────── */
 function CompanyHeader() {
   return (
-    <div className="flex flex-col items-center text-center px-8 pt-10 pb-8">
+    <div className="flex flex-col items-center text-center px-8 pt-10 pb-8 bg-white">
 
-      {/* ── Logo ── */}
+      {/* Logo */}
       <a
-        href={BRAND.website}
+        href={BRAND.website || '#'}
         target="_blank"
         rel="noopener noreferrer"
         aria-label={`${BRAND.name} website`}
-        className="inline-flex items-center justify-center mb-5 rounded-xl
-                   ring-2 ring-transparent hover:ring-slate-200 transition-all duration-200 p-1"
+        className="inline-block mb-5 rounded-lg p-1
+                   ring-2 ring-transparent hover:ring-slate-100 transition-all duration-200"
       >
         <img
           src={BRAND.logoSrc}
           alt={BRAND.logoAlt}
-          style={{ maxHeight: BRAND.logoMaxH, width: 'auto', maxWidth: 220 }}
-          className="object-contain select-none"
+          style={{ maxHeight: BRAND.logoMaxH, width: 'auto', maxWidth: 200 }}
+          className="object-contain block select-none"
           draggable="false"
+          onError={e => { e.currentTarget.style.display = 'none' }}
         />
       </a>
 
-      {/* ── Company name ── */}
-      <h2 className="text-[15px] font-bold text-slate-900 tracking-tight leading-tight">
+      {/* Company name */}
+      <h2 className="text-[15px] font-bold text-slate-900 leading-tight tracking-tight">
         {BRAND.name}
       </h2>
 
-      {/* ── Tagline ── */}
+      {/* Tagline */}
       {BRAND.tagline && (
-        <p className="mt-1.5 text-[13px] font-medium text-slate-500 leading-snug max-w-xs">
+        <p className="mt-1.5 text-[13px] text-slate-500 leading-snug">
           {BRAND.tagline}
         </p>
       )}
 
-      {/* ── Description ── */}
+      {/* Description */}
       {BRAND.description && (
         <p className="mt-3 text-[13px] text-slate-500 leading-relaxed max-w-sm">
           {BRAND.description}
         </p>
       )}
 
-      {/* ── Contact row ── */}
-      <div className="mt-5 flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
-
+      {/* Contact row */}
+      <div className="mt-5 flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
         {BRAND.website && (
-          <a
-            href={BRAND.website}
-            target="_blank"
-            rel="noopener noreferrer"
+          <a href={BRAND.website} target="_blank" rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 text-[12px] text-slate-500
-                       hover:text-slate-800 transition-colors duration-150"
-          >
+                       hover:text-slate-800 transition-colors">
             <GlobeIcon />
             {BRAND.website.replace(/^https?:\/\//, '')}
           </a>
         )}
-
         {BRAND.contactEmail && (
-          <a
-            href={`mailto:${BRAND.contactEmail}`}
+          <a href={`mailto:${BRAND.contactEmail}`}
             className="inline-flex items-center gap-1.5 text-[12px] text-slate-500
-                       hover:text-slate-800 transition-colors duration-150"
-          >
+                       hover:text-slate-800 transition-colors">
             <MailIcon />
             {BRAND.contactEmail}
           </a>
         )}
-
         {BRAND.location && (
           <span className="inline-flex items-center gap-1.5 text-[12px] text-slate-400 select-none">
             <PinIcon />
             {BRAND.location}
           </span>
         )}
-
         {BRAND.linkedin && (
-          <a
-            href={BRAND.linkedin}
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label="LinkedIn"
+          <a href={BRAND.linkedin} target="_blank" rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 text-[12px] text-slate-500
-                       hover:text-[#0A66C2] transition-colors duration-150"
-          >
+                       hover:text-[#0A66C2] transition-colors">
             <LinkedInIcon />
             LinkedIn
           </a>
@@ -122,64 +176,76 @@ function CompanyHeader() {
   )
 }
 
-/* ══════════════════════════════════════════════════════════════════════════════
-   FORM FIELD — all question types, upgraded visual style
-   ══════════════════════════════════════════════════════════════════════════════ */
+/* ─────────────────────────────────────────────────────────────────────────────
+   Form field — all question types
+───────────────────────────────────────────────────────────────────────────── */
 function FormField({ question, value, onChange, error }) {
   const { label, type, required, options, placeholder } = question
-  const id = `field-${question.question_id}`
+  const fieldId = `field-${question.question_id}`
 
-  const baseInput = [
-    'w-full rounded-lg border px-4 py-3 text-[14px] text-slate-800 leading-normal',
+  const baseClass = [
+    'w-full rounded-md border px-4 py-3 text-[14px] text-slate-800',
     'placeholder-slate-400 bg-white outline-none transition-all duration-150',
-    'focus:ring-2 focus:ring-offset-0 shadow-sm',
+    'focus:ring-2 focus:ring-offset-0',
     error
-      ? 'border-rose-300 focus:ring-rose-200 bg-rose-50/30'
-      : `border-slate-200 ${BRAND.accentRing} ${BRAND.accentBorder} hover:border-slate-300`,
+      ? 'border-rose-300 focus:ring-rose-100 bg-rose-50/40'
+      : 'border-slate-300 hover:border-slate-400 focus:border-slate-500 focus:ring-slate-100',
   ].join(' ')
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-1.5">
 
       {/* Label */}
-      <label htmlFor={id} className="text-[13px] font-semibold text-slate-700 leading-none select-none">
+      <label htmlFor={fieldId}
+        className="text-[13px] font-medium text-slate-700 leading-none">
         {label}
         {required && (
-          <span className="text-rose-500 ml-1" aria-label="required field">*</span>
+          <span className="text-rose-500 ml-1" aria-label="required">*</span>
         )}
       </label>
 
-      {/* Input controls */}
+      {/* Controls */}
       {type === 'short_text' && (
-        <input id={id} type="text" value={value || ''} onChange={e => onChange(e.target.value)}
-          placeholder={placeholder || ''} className={baseInput} autoComplete="off" />
+        <input id={fieldId} type="text" value={value || ''}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder || ''}
+          className={baseClass} autoComplete="off" />
       )}
 
       {type === 'email' && (
-        <input id={id} type="email" value={value || ''} onChange={e => onChange(e.target.value)}
-          placeholder={placeholder || 'you@company.com'} className={baseInput} autoComplete="email" />
+        <input id={fieldId} type="email" value={value || ''}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder || 'you@company.com'}
+          className={baseClass} autoComplete="email" />
       )}
 
       {type === 'phone' && (
-        <input id={id} type="tel" value={value || ''} onChange={e => onChange(e.target.value)}
-          placeholder={placeholder || '+91 98765 43210'} className={baseInput} autoComplete="tel" />
+        <input id={fieldId} type="tel" value={value || ''}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder || '+91 98765 43210'}
+          className={baseClass} autoComplete="tel" />
       )}
 
       {type === 'number' && (
-        <input id={id} type="number" value={value || ''} onChange={e => onChange(e.target.value)}
-          placeholder={placeholder || ''} className={baseInput} />
+        <input id={fieldId} type="number" value={value || ''}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder || ''}
+          className={baseClass} />
       )}
 
       {type === 'long_text' && (
-        <textarea id={id} value={value || ''} onChange={e => onChange(e.target.value)}
-          placeholder={placeholder || ''} rows={4}
-          className={`${baseInput} resize-none leading-relaxed`} />
+        <textarea id={fieldId} value={value || ''}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder || ''}
+          rows={4}
+          className={`${baseClass} resize-none leading-relaxed`} />
       )}
 
       {type === 'dropdown' && (
         <div className="relative">
-          <select id={id} value={value || ''} onChange={e => onChange(e.target.value)}
-            className={`${baseInput} pr-10 appearance-none cursor-pointer`}>
+          <select id={fieldId} value={value || ''}
+            onChange={e => onChange(e.target.value)}
+            className={`${baseClass} pr-10 appearance-none cursor-pointer`}>
             <option value="">Select an option</option>
             {(options || []).map(o => (
               <option key={o.value} value={o.value}>{o.label}</option>
@@ -192,16 +258,12 @@ function FormField({ question, value, onChange, error }) {
       )}
 
       {type === 'radio' && (
-        <div className="flex flex-col gap-3 mt-0.5">
+        <div className="flex flex-col gap-2.5 mt-0.5">
           {(options || []).map(o => (
-            <label key={o.value}
-              className="flex items-center gap-3 cursor-pointer group select-none">
-              <input
-                type="radio" name={id} value={o.value}
-                checked={value === o.value}
-                onChange={() => onChange(o.value)}
-                className="w-4 h-4 border-slate-300 text-slate-900 focus:ring-slate-400 cursor-pointer"
-              />
+            <label key={o.value} className="flex items-center gap-3 cursor-pointer group select-none">
+              <input type="radio" name={fieldId} value={o.value}
+                checked={value === o.value} onChange={() => onChange(o.value)}
+                className="w-4 h-4 border-slate-300 text-slate-900 focus:ring-slate-300 cursor-pointer" />
               <span className="text-[14px] text-slate-700 group-hover:text-slate-900 transition-colors">
                 {o.label}
               </span>
@@ -211,7 +273,7 @@ function FormField({ question, value, onChange, error }) {
       )}
 
       {type === 'checkbox' && (
-        <div className="flex flex-col gap-3 mt-0.5">
+        <div className="flex flex-col gap-2.5 mt-0.5">
           {(options || []).map(o => {
             const checked = Array.isArray(value) ? value.includes(o.value) : false
             const toggle = () => {
@@ -219,12 +281,9 @@ function FormField({ question, value, onChange, error }) {
               onChange(checked ? cur.filter(v => v !== o.value) : [...cur, o.value])
             }
             return (
-              <label key={o.value}
-                className="flex items-center gap-3 cursor-pointer group select-none">
-                <input
-                  type="checkbox" checked={checked} onChange={toggle}
-                  className="w-4 h-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400 cursor-pointer"
-                />
+              <label key={o.value} className="flex items-center gap-3 cursor-pointer group select-none">
+                <input type="checkbox" checked={checked} onChange={toggle}
+                  className="w-4 h-4 rounded border-slate-300 text-slate-900 focus:ring-slate-300 cursor-pointer" />
                 <span className="text-[14px] text-slate-700 group-hover:text-slate-900 transition-colors">
                   {o.label}
                 </span>
@@ -234,10 +293,10 @@ function FormField({ question, value, onChange, error }) {
         </div>
       )}
 
-      {/* Inline error */}
+      {/* Inline validation error */}
       {error && (
         <p role="alert" className="flex items-center gap-1.5 text-[12px] text-rose-600 mt-0.5">
-          <ErrorCircleIcon />
+          <AlertIcon />
           {error}
         </p>
       )}
@@ -245,133 +304,13 @@ function FormField({ question, value, onChange, error }) {
   )
 }
 
-/* ══════════════════════════════════════════════════════════════════════════════
-   FORM FOOTER — privacy / data-use note
-   ══════════════════════════════════════════════════════════════════════════════ */
-function FormFooter() {
-  return (
-    <div className="mt-8 pt-5 border-t border-slate-100">
-      <p className="text-[12px] text-slate-400 text-center leading-relaxed">
-        Your information will be used only for the purpose described in this form
-        and will not be shared with third parties.
-        {BRAND.privacyPolicyUrl && (
-          <>
-            {' '}
-            <a
-              href={BRAND.privacyPolicyUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline underline-offset-2 hover:text-slate-600 transition-colors"
-            >
-              Privacy Policy
-            </a>
-          </>
-        )}
-      </p>
-    </div>
-  )
-}
-
-/* ══════════════════════════════════════════════════════════════════════════════
-   ICON HELPERS — kept inline to avoid extra dependencies
-   ══════════════════════════════════════════════════════════════════════════════ */
-const sz = 'w-3.5 h-3.5 flex-shrink-0'
-
-function GlobeIcon() {
-  return (
-    <svg className={sz} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
-        d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9"/>
-    </svg>
-  )
-}
-
-function MailIcon() {
-  return (
-    <svg className={sz} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
-        d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-    </svg>
-  )
-}
-
-function PinIcon() {
-  return (
-    <svg className={sz} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
-        d="M17.657 16.657L13.414 20.9a2 2 0 01-2.828 0l-4.243-4.243a8 8 0 1111.314 0z"/>
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
-    </svg>
-  )
-}
-
-function LinkedInIcon() {
-  return (
-    <svg className={sz} fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
-    </svg>
-  )
-}
-
-function ChevronDownIcon() {
-  return (
-    <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/>
-    </svg>
-  )
-}
-
-function ErrorCircleIcon() {
-  return (
-    <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-        d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-    </svg>
-  )
-}
-
-function SpinnerIcon() {
-  return (
-    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
-    </svg>
-  )
-}
-
-function ArrowRightIcon() {
-  return (
-    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3"/>
-    </svg>
-  )
-}
-
-function ExternalLinkIcon() {
-  return (
-    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
-        d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
-    </svg>
-  )
-}
-
-function CheckIcon() {
-  return (
-    <svg className="w-6 h-6 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/>
-    </svg>
-  )
-}
-
-/* ══════════════════════════════════════════════════════════════════════════════
+/* ─────────────────────────────────────────────────────────────────────────────
    PAGE ROOT
-   ══════════════════════════════════════════════════════════════════════════════ */
+───────────────────────────────────────────────────────────────────────────── */
 export default function PublicForm() {
   const { form_id }    = useParams()
   const [searchParams] = useSearchParams()
 
-  // Tracking params injected by the platform campaign link
   const source      = searchParams.get('source')      || 'other'
   const campaign_id = searchParams.get('campaign_id') || searchParams.get('campaign') || null
 
@@ -384,7 +323,6 @@ export default function PublicForm() {
   const [submitted,  setSubmitted]  = useState(false)
   const [submitErr,  setSubmitErr]  = useState(null)
 
-  // ── Fetch form definition (unchanged) ─────────────────────────────────────
   useEffect(() => {
     getPublicForm(form_id)
       .then(d => setForm(d.form))
@@ -397,35 +335,31 @@ export default function PublicForm() {
     setErrors(prev => { const e = { ...prev }; delete e[qid]; return e })
   }
 
-  // ── Client-side validation (unchanged) ────────────────────────────────────
   const validate = () => {
-    const newErrors = {}
+    const errs = {}
     for (const q of (form?.questions || [])) {
       const val = answers[q.question_id]
       if (q.required) {
-        const isEmpty = val === undefined || val === null || val === '' ||
+        const empty = val === undefined || val === null || val === '' ||
           (Array.isArray(val) && val.length === 0)
-        if (isEmpty) newErrors[q.question_id] = `${q.label} is required`
+        if (empty) errs[q.question_id] = `${q.label} is required`
       }
       if (q.type === 'email' && val) {
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(val).trim()))
-          newErrors[q.question_id] = 'Please enter a valid email address'
+          errs[q.question_id] = 'Please enter a valid email address'
       }
     }
-    setErrors(newErrors)
-    return Object.keys(newErrors).length === 0
+    setErrors(errs)
+    return Object.keys(errs).length === 0
   }
 
-  // ── Submission (unchanged logic) ──────────────────────────────────────────
   const handleSubmit = async (e) => {
     e.preventDefault()
     setSubmitErr(null)
     if (!validate()) return
-
     const answerList = Object.entries(answers)
       .filter(([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0))
       .map(([question_id, value]) => ({ question_id, value }))
-
     setSubmitting(true)
     try {
       await submitPublicForm(form_id, { answers: answerList, source, campaign_id })
@@ -437,98 +371,89 @@ export default function PublicForm() {
     }
   }
 
-  // ── Shared page shell ──────────────────────────────────────────────────────
-  const pageBg = 'min-h-screen bg-slate-50 py-8 px-4 sm:px-6'
+  /* ── shared page shell ────────────────────────────────────────────────── */
+  const shell = 'min-h-screen bg-[#f3f4f6] flex flex-col items-center justify-start py-10 px-4'
 
-  /* ── Loading state ─────────────────────────────────────────────────────── */
+  /* ── Loading ──────────────────────────────────────────────────────────── */
   if (loading) return (
-    <div className={`${pageBg} flex items-center justify-center`}>
-      <div className="flex flex-col items-center gap-4">
+    <div className={`${shell} justify-center`}>
+      <div className="flex flex-col items-center gap-5">
         <img
           src={BRAND.logoSrc}
           alt={BRAND.logoAlt}
-          style={{ maxHeight: BRAND.logoMaxH, width: 'auto', opacity: 0.45 }}
+          style={{ maxHeight: BRAND.logoMaxH, width: 'auto', opacity: 0.4 }}
           className="object-contain"
+          onError={e => { e.currentTarget.style.display = 'none' }}
         />
         <SpinnerIcon />
+        <p className="text-[13px] text-slate-400">Loading form…</p>
       </div>
     </div>
   )
 
-  /* ── Not found ─────────────────────────────────────────────────────────── */
+  /* ── Not found ────────────────────────────────────────────────────────── */
   if (notFound || !form) return (
-    <div className={`${pageBg} flex items-center justify-center`}>
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-10
-                      max-w-sm w-full text-center">
-        <img
-          src={BRAND.logoSrc}
-          alt={BRAND.logoAlt}
-          style={{ maxHeight: 42, width: 'auto' }}
-          className="object-contain mx-auto mb-7 opacity-55"
-        />
-        <div className="w-11 h-11 rounded-full bg-slate-100 flex items-center
-                        justify-center mx-auto mb-4">
-          <svg className="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-              d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-          </svg>
-        </div>
-        <h1 className="text-base font-bold text-slate-800 mb-2">Form Not Found</h1>
-        <p className="text-sm text-slate-500 leading-relaxed">
-          This form may have been removed or is no longer accepting responses.
-        </p>
-        {BRAND.contactEmail && (
-          <p className="text-xs text-slate-400 mt-4">
-            Need help?{' '}
-            <a href={`mailto:${BRAND.contactEmail}`}
-              className="underline underline-offset-2 hover:text-slate-600 transition-colors">
-              {BRAND.contactEmail}
-            </a>
-          </p>
-        )}
-      </div>
-    </div>
-  )
-
-  /* ── Success state ─────────────────────────────────────────────────────── */
-  if (submitted) return (
-    <div className={`${pageBg} flex items-center justify-center`}>
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden
-                      max-w-sm w-full text-center">
-
-        {/* Thin accent bar at top */}
-        <div className={`h-1 w-full ${BRAND.accentBarBg}`} />
-
-        <div className="p-10">
-          {/* Logo stays visible */}
+    <div className={`${shell} justify-center`}>
+      <div className="w-full max-w-[480px] bg-white rounded-2xl shadow-sm
+                      border border-slate-200 overflow-hidden">
+        <div className="h-1 w-full bg-slate-900" />
+        <div className="p-10 flex flex-col items-center text-center">
           <img
             src={BRAND.logoSrc}
             alt={BRAND.logoAlt}
-            style={{ maxHeight: 48, width: 'auto' }}
+            style={{ maxHeight: 44, width: 'auto', opacity: 0.5 }}
             className="object-contain mx-auto mb-7"
+            onError={e => { e.currentTarget.style.display = 'none' }}
           />
-
-          {/* Success icon */}
-          <div className="w-12 h-12 rounded-full bg-emerald-50 flex items-center
-                          justify-center mx-auto mb-5">
-            <CheckIcon />
+          <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-4">
+            <svg className="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
           </div>
+          <h1 className="text-[17px] font-bold text-slate-800 mb-2">Form Not Found</h1>
+          <p className="text-[13px] text-slate-500 leading-relaxed">
+            This form may have been removed or is no longer accepting responses.
+          </p>
+          {BRAND.contactEmail && (
+            <p className="text-[12px] text-slate-400 mt-5">
+              Need help?{' '}
+              <a href={`mailto:${BRAND.contactEmail}`}
+                className="underline underline-offset-2 hover:text-slate-700 transition-colors">
+                {BRAND.contactEmail}
+              </a>
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
 
-          <h1 className="text-[18px] font-bold text-slate-900 mb-3">Response Received</h1>
-          <p className="text-[14px] text-slate-600 leading-relaxed">
+  /* ── Success ──────────────────────────────────────────────────────────── */
+  if (submitted) return (
+    <div className={`${shell} justify-center`}>
+      <div className="w-full max-w-[480px] bg-white rounded-2xl shadow-sm
+                      border border-slate-200 overflow-hidden">
+        <div className="h-1 w-full bg-slate-900" />
+        <div className="p-10 flex flex-col items-center text-center">
+          <img
+            src={BRAND.logoSrc}
+            alt={BRAND.logoAlt}
+            style={{ maxHeight: BRAND.logoMaxH, width: 'auto' }}
+            className="object-contain mx-auto mb-8"
+            onError={e => { e.currentTarget.style.display = 'none' }}
+          />
+          <CheckCircleIcon />
+          <h1 className="mt-5 text-[20px] font-bold text-slate-900">Response Received</h1>
+          <p className="mt-3 text-[14px] text-slate-500 leading-relaxed max-w-xs">
             Thank you for reaching out to{' '}
             <span className="font-semibold text-slate-800">{BRAND.name}</span>.
-            Our team will review your information and contact you shortly.
+            Our team will review your submission and be in touch shortly.
           </p>
-
           {BRAND.website && (
-            <a
-              href={BRAND.website}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-7 inline-flex items-center gap-1.5 text-[12px] text-slate-500
-                         hover:text-slate-800 transition-colors"
-            >
+            <a href={BRAND.website} target="_blank" rel="noopener noreferrer"
+              className="mt-7 inline-flex items-center gap-1.5 text-[12px] text-slate-400
+                         hover:text-slate-700 transition-colors">
               <ExternalLinkIcon />
               Visit {BRAND.website.replace(/^https?:\/\//, '')}
             </a>
@@ -538,62 +463,65 @@ export default function PublicForm() {
     </div>
   )
 
-  /* ── Main form page ────────────────────────────────────────────────────── */
+  /* ── Main form ────────────────────────────────────────────────────────── */
   const plt = PLATFORM_LABELS[source] ?? PLATFORM_LABELS.other
   const sortedQuestions = [...(form.questions || [])].sort(
     (a, b) => a.display_order - b.display_order
   )
-  const hasRequiredFields = sortedQuestions.some(q => q.required)
+  const hasRequired = sortedQuestions.some(q => q.required)
 
   return (
-    <div className={pageBg}>
-      <div className="max-w-[580px] mx-auto">
+    <div className={shell}>
+      <div className="w-full max-w-[600px]">
 
-        {/* ── Main card ──────────────────────────────────────────────────── */}
-        <div className="bg-white rounded-2xl shadow-md border border-slate-200 overflow-hidden">
+        {/* ── Card ───────────────────────────────────────────────────────── */}
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
 
-          {/* Thin branded accent bar — the single brand colour touch */}
-          <div className={`h-1 w-full ${BRAND.accentBarBg}`} />
+          {/* Top accent line */}
+          <div className="h-[3px] w-full bg-slate-900" />
 
-          {/* Company header */}
+          {/* ── Company header ─────────────────────────────────────────── */}
           <CompanyHeader />
 
           {/* Divider */}
-          <div className="h-px bg-slate-100" />
+          <div className="h-px bg-slate-200" />
 
-          {/* Form header — title, category, description */}
-          <div className="px-8 pt-7 pb-6">
+          {/* ── Form header ────────────────────────────────────────────── */}
+          <div className="px-8 pt-8 pb-6">
 
-            {/* Source / platform badge — only shown when a campaign tracking link was used */}
+            {/* Platform badge — only when a real campaign source is passed */}
             {source && source !== 'other' && (
               <span className={`inline-flex items-center px-2.5 py-1 rounded-full
-                               text-[11px] font-semibold border mb-4 ${plt.color}`}>
+                               text-[11px] font-semibold border mb-5 ${plt.color}`}>
                 {plt.label}
               </span>
             )}
 
             {/* Form title */}
-            <h1 className="text-[22px] font-bold text-slate-900 leading-tight">
+            <h1 className="text-[24px] font-bold text-slate-900 leading-tight">
               {form.name}
             </h1>
 
-            {/* Category label */}
+            {/* Category pill */}
             {form.category && (
-              <p className="mt-1 text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
+              <p className="mt-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
                 {form.category}
               </p>
             )}
 
-            {/* Form description — from CRM config, or a generic professional fallback */}
+            {/* Form description */}
             <p className="mt-3 text-[14px] text-slate-500 leading-relaxed">
               {form.description
                 ? form.description
                 : 'Please complete the form below and our team will be in touch with you regarding your enquiry.'}
             </p>
 
-            {hasRequiredFields && (
-              <p className="mt-3 text-[12px] text-slate-400">
-                Fields marked <span className="text-rose-500 font-semibold">*</span> are required.
+            {/* Required fields note */}
+            {hasRequired && (
+              <p className="mt-3 text-[12.5px] text-slate-400">
+                Fields marked{' '}
+                <span className="text-rose-500 font-semibold">*</span>
+                {' '}are required.
               </p>
             )}
           </div>
@@ -601,21 +529,21 @@ export default function PublicForm() {
           {/* Divider */}
           <div className="h-px bg-slate-100" />
 
-          {/* ── Form body ─────────────────────────────────────────────────── */}
-          <form onSubmit={handleSubmit} className="px-8 py-7" noValidate>
+          {/* ── Form body ──────────────────────────────────────────────── */}
+          <form onSubmit={handleSubmit} className="px-8 py-8" noValidate>
 
-            {/* Submission error banner */}
+            {/* Submit error banner */}
             {submitErr && (
               <div role="alert"
                 className="mb-6 flex items-start gap-3 p-4 rounded-lg
                            bg-rose-50 border border-rose-200 text-[13px] text-rose-700">
-                <ErrorCircleIcon />
-                <span>{submitErr}</span>
+                <AlertIcon />
+                <span className="leading-snug">{submitErr}</span>
               </div>
             )}
 
-            {/* Dynamic form fields */}
-            <div className="space-y-6">
+            {/* Fields */}
+            <div className="space-y-7">
               {sortedQuestions.map(q => (
                 <FormField
                   key={q.question_id}
@@ -627,84 +555,73 @@ export default function PublicForm() {
               ))}
             </div>
 
-            {/* Honeypot — invisible to real users, traps bots */}
+            {/* Honeypot anti-bot */}
             <input
-              type="text"
-              name="hp"
-              autoComplete="off"
+              type="text" name="hp" autoComplete="off" tabIndex={-1} aria-hidden="true"
               className="absolute left-[-9999px] opacity-0 pointer-events-none"
-              tabIndex={-1}
-              aria-hidden="true"
             />
 
-            {/* Submit button */}
+            {/* Submit */}
             <button
               type="submit"
               disabled={submitting}
               className={[
-                'mt-8 w-full py-3.5 rounded-lg text-[14px] font-semibold text-white',
+                'mt-9 w-full py-3.5 px-6 rounded-lg',
+                'text-[14px] font-semibold text-white',
                 'flex items-center justify-center gap-2.5',
+                'bg-slate-900 hover:bg-slate-800 active:bg-slate-950',
                 'transition-all duration-150 shadow-sm hover:shadow-md',
                 'focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-700',
                 'disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none',
-                BRAND.accentBg,
-                BRAND.accentHoverBg,
               ].join(' ')}
             >
-              {submitting ? (
-                <>
-                  <SpinnerIcon />
-                  Submitting…
-                </>
-              ) : (
-                <>
-                  Submit Enquiry
-                  <ArrowRightIcon />
-                </>
-              )}
+              {submitting
+                ? <><SpinnerIcon /> Submitting…</>
+                : <><span>Submit Enquiry</span><ArrowRightIcon /></>
+              }
             </button>
 
-            {/* Privacy / data-use footer */}
-            <FormFooter />
+            {/* Privacy note */}
+            <div className="mt-7 pt-6 border-t border-slate-100">
+              <p className="text-[12px] text-slate-400 text-center leading-relaxed">
+                Your information will only be used for the purpose described in this form
+                and will not be shared with third parties.
+                {BRAND.privacyPolicyUrl && (
+                  <>
+                    {' '}
+                    <a href={BRAND.privacyPolicyUrl} target="_blank" rel="noopener noreferrer"
+                      className="underline underline-offset-2 hover:text-slate-600 transition-colors">
+                      Privacy Policy
+                    </a>
+                  </>
+                )}
+              </p>
+            </div>
           </form>
         </div>
 
         {/* ── Page footer ────────────────────────────────────────────────── */}
-        <div className="mt-5 flex flex-wrap items-center justify-center gap-x-3 gap-y-1
+        <div className="mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-1
                         text-[11px] text-slate-400">
           <span>
-            © {new Date().getFullYear()}{' '}
-            <a
-              href={BRAND.website}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hover:text-slate-600 transition-colors"
-            >
+            ©{' '}{new Date().getFullYear()}{' '}
+            <a href={BRAND.website || '#'} target="_blank" rel="noopener noreferrer"
+              className="hover:text-slate-600 transition-colors">
               {BRAND.name}
             </a>
           </span>
           {BRAND.linkedin && (
             <>
               <span aria-hidden="true">·</span>
-              <a
-                href={BRAND.linkedin}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-slate-600 transition-colors"
-              >
-                LinkedIn
-              </a>
+              <a href={BRAND.linkedin} target="_blank" rel="noopener noreferrer"
+                className="hover:text-slate-600 transition-colors">LinkedIn</a>
             </>
           )}
           {BRAND.contactEmail && (
             <>
               <span aria-hidden="true">·</span>
-              <a
-                href={`mailto:${BRAND.contactEmail}`}
-                className="hover:text-slate-600 transition-colors"
-              >
-                {BRAND.contactEmail}
-              </a>
+              <a href={`mailto:${BRAND.contactEmail}`}
+                className="hover:text-slate-600 transition-colors">{BRAND.contactEmail}</a>
             </>
           )}
         </div>

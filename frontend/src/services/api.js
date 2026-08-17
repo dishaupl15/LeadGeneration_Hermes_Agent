@@ -1,22 +1,28 @@
 /**
  * API service layer — all network calls live here.
  *
- * Keeping fetch logic out of components means:
- *  - One place to change the base URL
- *  - One place to add auth headers later
- *  - Components stay clean and testable
+ * BASE_URL resolution order:
+ *   1. VITE_API_URL env var  — explicit override (production / staging)
+ *   2. Same hostname as the browser + port 8002  — works automatically when
+ *      the app is opened via localhost, LAN IP, or any other hostname without
+ *      needing to change .env on every machine.
  *
- * BASE_URL is read from the VITE_API_URL environment variable so the
- * app works correctly when opened on any device on the local network
- * (not just the machine running the dev server).
- *
- * Set it in frontend/.env:
- *   VITE_API_URL=http://YOUR_LOCAL_IP:8002
- *
- * Falls back to http://localhost:8002 when the variable is not set.
+ * Set VITE_API_URL in frontend/.env only if your backend is on a different
+ * host or port, e.g. for a deployed backend:
+ *   VITE_API_URL=https://api.yourapp.com
  */
 
-const BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') || 'http://localhost:8002'
+const BASE_URL = (() => {
+  // Explicit override wins
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL.replace(/\/$/, '')
+  }
+  // In the browser: use the same hostname the page was loaded from + backend port 8002
+  if (typeof window !== 'undefined') {
+    return `${window.location.protocol}//${window.location.hostname}:8002`
+  }
+  return 'http://localhost:8002'
+})()
 
 /**
  * Shared fetch wrapper.
@@ -571,17 +577,28 @@ export async function addLeadNote(leadId, text, category = null) {
 
 /**
  * PATCH /leads/{lead_id}/follow-up
- * Set or clear the follow-up date for a lead.
+ * Set or clear the follow-up for a lead.
  *
  * @param {string} leadId
- * @param {string|null} followUpDate  ISO date "YYYY-MM-DD" or null to clear
+ * @param {string|null} followUpDate    ISO date "YYYY-MM-DD" or null to clear
  * @param {string|null} category
- * @returns {Promise<{ success: boolean, follow_up_date: string|null, lead: object }>}
+ * @param {string|null} followUpTime    "HH:MM" or null
+ * @param {string|null} followUpMethod  "Call" | "Email" | "WhatsApp" | "Meeting"
+ * @param {string|null} followUpAction  Next action label
+ * @returns {Promise<{ success: boolean, lead: object, ... }>}
  */
-export async function updateLeadFollowUp(leadId, followUpDate, category = null) {
+export async function updateLeadFollowUp(leadId, followUpDate, category = null,
+                                          followUpTime = null, followUpMethod = null,
+                                          followUpAction = null) {
   return apiFetch(`/leads/${encodeURIComponent(leadId)}/follow-up`, {
     method: 'PATCH',
-    body: JSON.stringify({ follow_up_date: followUpDate || null, category: category || undefined }),
+    body: JSON.stringify({
+      follow_up_date:   followUpDate   || null,
+      follow_up_time:   followUpTime   || null,
+      follow_up_method: followUpMethod || null,
+      follow_up_action: followUpAction || null,
+      category:         category       || undefined,
+    }),
   })
 }
 
