@@ -564,6 +564,10 @@ function StatCard({ label, value, icon, color }) {
  * It fetches from GET /leads with tab + search + date_from + date_to params.
  * Counts come from GET /leads/status-counts.
  *
+ * When no category is selected (effectiveCategory is null/empty), it automatically
+ * passes all_categories=true to show leads from ALL industry collections combined,
+ * with a category-wise breakdown.
+ *
  * Tabs: New Leads | Old Untouched | Interested | Not Interested | Follow-ups | All Leads
  */
 function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate,
@@ -579,12 +583,16 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate,
   // globally selected category so the CRM shows the clicked category's leads.
   const effectiveCategory = crmCategory || category
 
+  // Whether we are in "all categories" mode — true when no specific category is scoped
+  const isAllCategories = !effectiveCategory
+
   // Leads query state
-  const [leads,    setLeads]    = useState([])
-  const [total,    setTotal]    = useState(0)
-  const [page,     setPage]     = useState(1)
-  const [loading,  setLoading]  = useState(false)
-  const [error,    setError]    = useState('')
+  const [leads,      setLeads]      = useState([])
+  const [total,      setTotal]      = useState(0)
+  const [byCategory, setByCategory] = useState([])   // [{category, count}] in all-cats mode
+  const [page,       setPage]       = useState(1)
+  const [loading,    setLoading]    = useState(false)
+  const [error,      setError]      = useState('')
   const PER_PAGE = 50
 
   // Tab counts
@@ -615,12 +623,12 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate,
   useEffect(() => {
     let cancelled = false
     setCountsLoading(true)
-    getLeadStatusCounts(effectiveCategory || null)
+    getLeadStatusCounts(effectiveCategory || null, isAllCategories)
       .then(res => { if (!cancelled) setCounts(res.counts ?? {}) })
       .catch(() => { if (!cancelled) setCounts({}) })
       .finally(() => { if (!cancelled) setCountsLoading(false) })
     return () => { cancelled = true }
-  }, [effectiveCategory, refreshTrigger])
+  }, [effectiveCategory, isAllCategories, refreshTrigger])
 
   // Re-fetch leads whenever any filter changes
   useEffect(() => {
@@ -629,6 +637,8 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate,
     setError('')
     const params = {
       ...(effectiveCategory ? { category: effectiveCategory } : {}),
+      // When no category is selected, always fan out across all collections
+      ...(isAllCategories ? { all_categories: true } : {}),
       tab:       activeTab,
       page,
       per_page:  PER_PAGE,
@@ -641,15 +651,16 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate,
         if (!cancelled) {
           setLeads(res.leads ?? [])
           setTotal(res.total ?? 0)
+          setByCategory(res.by_category ?? [])
         }
       })
       .catch(err => { if (!cancelled) setError(err.message || 'Failed to load leads.') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [effectiveCategory, activeTab, page, debouncedSearch, dateFrom, dateTo, refreshTrigger])
+  }, [effectiveCategory, isAllCategories, activeTab, page, debouncedSearch, dateFrom, dateTo, refreshTrigger])
 
   // Reset to page 1 when filters change (but not page itself)
-  useEffect(() => { setPage(1) }, [effectiveCategory, activeTab, debouncedSearch, dateFrom, dateTo])
+  useEffect(() => { setPage(1) }, [effectiveCategory, isAllCategories, activeTab, debouncedSearch, dateFrom, dateTo])
 
   const TABS = [
     { key: 'new_leads',      label: 'New Leads',      countKey: 'new',           dot: 'bg-sky-400',     active: 'bg-sky-600 text-white border-sky-600',                       inactive: 'bg-white text-sky-700 border-sky-200 hover:bg-sky-50' },
@@ -676,6 +687,12 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate,
           {!countsLoading && (
             <span className="text-xs font-normal text-slate-400">
               — {counts.total ?? 0} total
+            </span>
+          )}
+          {isAllCategories && !crmCategory && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full
+                             bg-indigo-50 border border-indigo-200 text-indigo-600 text-[11px] font-medium">
+              All categories
             </span>
           )}
           {crmCategory && (
@@ -834,6 +851,32 @@ function LeadsExplorer({ category, refreshTrigger, onStatusUpdate, onLeadUpdate,
       {/* ── Error ── */}
       {error && (
         <p className="text-sm text-rose-600 mb-3">{error}</p>
+      )}
+
+      {/* ── All-categories breakdown strip ── */}
+      {/* Shown when no category filter is active and we have by_category data */}
+      {isAllCategories && byCategory.length > 0 && !loading && (
+        <div className="mb-4 p-3 rounded-xl bg-slate-50 border border-slate-200">
+          <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-2 px-0.5">
+            Category breakdown — all time
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {byCategory.map(bc => (
+              <span
+                key={bc.category}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full
+                           bg-white border border-slate-200 text-slate-700
+                           text-[11px] font-medium shadow-sm"
+              >
+                <span className="font-bold text-slate-900">{bc.category}</span>
+                <span className="inline-flex items-center justify-center min-w-[20px] h-4 px-1.5
+                                 rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold">
+                  {bc.count}
+                </span>
+              </span>
+            ))}
+          </div>
+        </div>
       )}
 
       {/* ── Table ── */}

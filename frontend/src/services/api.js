@@ -141,12 +141,17 @@ export async function getTodayLeads(params = {}) {
 }
 
 /**
- * GET /leads  — list all stored leads with optional filters
- * @param {{ category?: string, search?: string, page?: number, per_page?: number }} params
+ * GET /leads  — list all stored leads with optional filters.
+ *
+ * Pass all_categories=true (and no category) to fan out across every
+ * leads_* collection and receive a combined paginated result with
+ * a by_category breakdown.
+ *
+ * @param {{ category?: string, search?: string, page?: number, per_page?: number, all_categories?: boolean }} params
  */
 export async function getLeads(params = {}) {
   const qs = new URLSearchParams(
-    Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== ''))
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== '' && v !== false))
   ).toString()
   return apiFetch(`/leads${qs ? `?${qs}` : ''}`)
 }
@@ -533,12 +538,19 @@ export async function updateLeadStatus(leadId, newStatus, category = null) {
  * GET /leads/status-counts
  * Returns { new: N, interested: N, not_interested: N, total: N } from MongoDB.
  *
+ * Pass allCategories=true (and no category) to sum counts across every
+ * leads_* collection in the database.
+ *
  * @param {string|null} category
+ * @param {boolean}     allCategories
  * @returns {Promise<{ success: boolean, counts: object }>}
  */
-export async function getLeadStatusCounts(category = null) {
-  const qs = category ? `?category=${encodeURIComponent(category)}` : ''
-  return apiFetch(`/leads/status-counts${qs}`)
+export async function getLeadStatusCounts(category = null, allCategories = false) {
+  const params = {}
+  if (category) params.category = category
+  if (allCategories && !category) params.all_categories = 'true'
+  const qs = new URLSearchParams(params).toString()
+  return apiFetch(`/leads/status-counts${qs ? `?${qs}` : ''}`)
 }
 
 /**
