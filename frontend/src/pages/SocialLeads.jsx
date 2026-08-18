@@ -16,6 +16,8 @@
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
+import Layout from '../components/Layout'
 import {
   getSocialLeads,
   getSocialLeadsStats,
@@ -621,101 +623,42 @@ export default function SocialLeads() {
   })()
 
   /* ════════════════════════════════════════════════════════════════════════ */
+  const navigate = useNavigate()
   return (
-    <div className="min-h-screen bg-slate-100">
+    <Layout onOpenFollowUps={() => navigate('/follow-ups')}>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
 
-      {/* ── TOP NAV ──────────────────────────────────────────────────────── */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="h-16 flex items-center justify-between gap-3">
-            {/* Brand */}
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600
-                              flex items-center justify-center shadow-md flex-shrink-0">
-                <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
-                    d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857
-                       M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857
-                       m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
-                </svg>
-              </div>
-              <div className="min-w-0">
-                <span className="text-base font-bold text-slate-900">Social Leads</span>
-                <span className="hidden md:inline ml-2 text-xs text-slate-400">
-                  Platform · Category · Form · Campaign
-                </span>
-              </div>
-            </div>
-
-            {/* Nav actions */}
-            <div className="flex items-center gap-2 flex-shrink-0">
-              {/* Export */}
-              <button
-                onClick={handleExport}
-                disabled={exporting || total === 0}
-                title={total === 0 ? 'No leads to export' : `Export ${total} leads as CSV`}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-emerald-200
-                           bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-xs font-semibold
-                           transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-                {exporting
-                  ? <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
-                    </svg>
-                  : <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                        d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-                    </svg>
-                }
-                <span className="hidden sm:inline">{exporting ? 'Exporting…' : `Export${hasFilters ? ' Filtered' : ''} CSV`}</span>
-              </button>
-
-              {/* Seed test data */}
-              <button
-                onClick={handleSeed}
-                disabled={seeding}
-                title="Insert 10 realistic test leads (dev/QA)"
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-amber-200
-                           bg-amber-50 text-amber-700 hover:bg-amber-100 text-xs font-semibold
-                           transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                {seeding
-                  ? <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
-                    </svg>
-                  : '🌱'
-                }
-                <span className="hidden sm:inline">{seeding ? 'Seeding…' : 'Seed Test Data'}</span>
-              </button>
-
-              {/* Lead Forms */}
-              <a href="/forms"
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-violet-200
-                           bg-violet-50 text-violet-700 hover:bg-violet-100 text-xs font-semibold transition-colors">
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                    d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2
-                       M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-                </svg>
-                <span className="hidden sm:inline">Lead Forms</span>
-              </a>
-
-              {/* Lead Generator */}
-              <a href="/"
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200
-                           bg-white text-slate-600 hover:bg-slate-50 text-xs font-semibold transition-colors">
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                    d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                </svg>
-                <span className="hidden sm:inline">Lead Generator</span>
-              </a>
-            </div>
+        {/* Page header */}
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+          <div>
+            <h1 className="text-xl font-bold text-slate-900">Social Leads</h1>
+            <p className="text-sm text-slate-500 mt-1">Leads collected from forms and social platforms.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {/* Export */}
+            <button
+              onClick={handleExport}
+              disabled={exporting || total === 0}
+              className="btn-secondary px-3 py-2 text-xs gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed">
+              {exporting
+                ? <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+                  </svg>
+                : <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                  </svg>
+              }
+              {exporting ? 'Exporting…' : 'Export CSV'}
+            </button>
+            {/* Seed test data */}
+            <button onClick={handleSeed} disabled={seeding}
+              className="btn-secondary px-3 py-2 text-xs gap-1.5 disabled:opacity-50">
+              {seeding ? '…' : '🌱'} {seeding ? 'Seeding…' : 'Seed Test Data'}
+            </button>
           </div>
         </div>
-      </header>
-
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
         {/* Seed message */}
         {seedMsg && (
@@ -1011,7 +954,7 @@ export default function SocialLeads() {
             </div>
           </div>
         </div>
-      </main>
+      </div>
 
       {/* Lead detail slide-in panel */}
       {selectedSubId && (
@@ -1020,6 +963,6 @@ export default function SocialLeads() {
           onClose={() => setSelectedSubId(null)}
         />
       )}
-    </div>
+    </Layout>
   )
 }

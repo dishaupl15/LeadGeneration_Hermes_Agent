@@ -18,6 +18,8 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
+import Layout from '../components/Layout'
 import {
   getOrigamiHealth,
   testOrigamiAuth,
@@ -235,58 +237,20 @@ export default function OrigamiEnrichment() {
   }, [bulkCategory, loadStats])
 
   // ── Render ────────────────────────────────────────────────────────────────────
+  const navigate = useNavigate()
   return (
-    <div className="min-h-screen bg-slate-100">
-
-      {/* ── TOP NAV ────────────────────────────────────────────────────────── */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="h-16 flex items-center justify-between">
-
-            {/* Brand + breadcrumb */}
-            <div className="flex items-center gap-3">
-              <a href="/" className="flex items-center gap-2.5 group">
-                <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center shadow-md shadow-indigo-200">
-                  <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                  </svg>
-                </div>
-                <span className="text-sm font-semibold text-slate-500 group-hover:text-indigo-600 transition-colors">LeadCRM</span>
-              </a>
-              <span className="text-slate-300">/</span>
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-lg bg-fuchsia-100 flex items-center justify-center">
-                  <svg className="w-4 h-4 text-fuchsia-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3
-                         m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547
-                         A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531
-                         c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
-                  </svg>
-                </div>
-                <span className="text-sm font-bold text-slate-800">Origami Enrichment</span>
-              </div>
-            </div>
-
-            {/* Back button */}
-            <a
-              href="/"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg
-                         border border-slate-200 bg-white text-slate-600
-                         hover:bg-slate-50 hover:border-slate-300
-                         text-xs font-semibold transition-colors"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/>
-              </svg>
-              Back to CRM
-            </a>
-          </div>
-        </div>
-      </header>
-
+    <Layout
+      onOpenFollowUps={() => navigate('/follow-ups')}
+      onNavigateToLead={(lead) => navigate('/', { state: { scrollToLead: lead.id ?? lead._id } })}
+    >
       {/* ── PAGE CONTENT ───────────────────────────────────────────────────── */}
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+
+        {/* Page header */}
+        <div className="mb-2">
+          <h1 className="text-xl font-bold text-slate-900">People Enrichment</h1>
+          <p className="text-sm text-slate-500 mt-1">Find founders, CEOs, and decision-makers for your leads.</p>
+        </div>
 
         {/* ── Row 1: Health card + Auth test card ──────────────────────────── */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -748,7 +712,7 @@ export default function OrigamiEnrichment() {
           </div>
         </details>
 
-      </main>
-    </div>
+      </div>
+    </Layout>
   )
 }

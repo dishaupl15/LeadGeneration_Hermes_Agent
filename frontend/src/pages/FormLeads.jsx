@@ -10,8 +10,10 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { CATEGORIES } from '../config/categories'
 import { BRAND } from '../config/brandConfig'
+import Layout from '../components/Layout'
 import {
   createForm, listForms, getFormDetail,
   updateForm, deleteForm, createCampaign, listSubmissions,
@@ -1207,40 +1209,11 @@ export default function FormLeads() {
     }
   }
 
-  return (
-    <div className="min-h-screen bg-slate-100">
-      {/* Top nav */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="h-16 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-violet-600 flex items-center justify-center shadow-md">
-                <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
-                    d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-                </svg>
-              </div>
-              <div>
-                <span className="text-base font-bold text-slate-900">Lead Forms</span>
-                <span className="hidden sm:inline ml-2 text-xs text-slate-400">
-                  — Social Lead Collection
-                </span>
-              </div>
-            </div>
-            <a href="/"
-              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl border border-slate-200
-                         bg-white text-slate-600 hover:bg-slate-50 text-xs font-semibold transition-colors">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M13 10V3L4 14h7v7l9-11h-7z"/>
-              </svg>
-              Lead Generator
-            </a>
-          </div>
-        </div>
-      </header>
+  const navigate = useNavigate()
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+  return (
+    <Layout onOpenFollowUps={() => navigate('/follow-ups')}>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
         {view === 'list' && (
           <FormsList
@@ -1266,7 +1239,7 @@ export default function FormLeads() {
             onEdit={handleEdit}
           />
         )}
-      </main>
-    </div>
+      </div>
+    </Layout>
   )
 }
