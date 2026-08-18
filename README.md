@@ -2,6 +2,8 @@
 
 A full-stack CRM tool that generates real B2B leads using **Serper** (Google Search API) and **Firecrawl** (website scraping), stores them in **MongoDB**, and displays them in a clean React dashboard.
 
+> **Latest update:** Complete UI/UX redesign — branded public forms (Pratap AI logo), searchable industry dropdown, clean history page (no legacy section), Today's Leads filter, and simplified navigation.
+
 Select an industry category → click Generate → the backend calls `leadgen.py` which searches Google, scrapes company websites, and returns structured lead data to the UI.
 
 ---
