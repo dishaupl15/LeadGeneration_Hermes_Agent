@@ -40,6 +40,8 @@ const QUESTION_TYPES = [
   { value: 'email',      label: 'Email' },
   { value: 'phone',      label: 'Phone' },
   { value: 'number',     label: 'Number' },
+  { value: 'date',       label: 'Date' },
+  { value: 'time',       label: 'Time' },
   { value: 'long_text',  label: 'Long Text' },
   { value: 'dropdown',   label: 'Dropdown' },
   { value: 'radio',      label: 'Radio' },
@@ -135,6 +137,14 @@ function PreviewFormField({ question, value, onChange, error }) {
       {type === 'number' && (
         <input id={fieldId} type="number" value={value || ''} onChange={e => onChange(e.target.value)}
           placeholder={placeholder || ''} className={baseClass} />
+      )}
+      {type === 'date' && (
+        <input id={fieldId} type="date" value={value || ''} onChange={e => onChange(e.target.value)}
+          className={baseClass} />
+      )}
+      {type === 'time' && (
+        <input id={fieldId} type="time" value={value || ''} onChange={e => onChange(e.target.value)}
+          className={baseClass} />
       )}
       {type === 'long_text' && (
         <textarea id={fieldId} value={value || ''} onChange={e => onChange(e.target.value)}

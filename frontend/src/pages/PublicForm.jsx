@@ -233,6 +233,18 @@ function FormField({ question, value, onChange, error }) {
           className={baseClass} />
       )}
 
+      {type === 'date' && (
+        <input id={fieldId} type="date" value={value || ''}
+          onChange={e => onChange(e.target.value)}
+          className={baseClass} />
+      )}
+
+      {type === 'time' && (
+        <input id={fieldId} type="time" value={value || ''}
+          onChange={e => onChange(e.target.value)}
+          className={baseClass} />
+      )}
+
       {type === 'long_text' && (
         <textarea id={fieldId} value={value || ''}
           onChange={e => onChange(e.target.value)}
