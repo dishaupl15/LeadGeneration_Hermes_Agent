@@ -478,6 +478,8 @@ function FormBuilder({ initialData, onSave, onCancel }) {
   )
   const [saving, setSaving] = useState(false)
   const [error,  setError]  = useState(null)
+  // Per-field validation errors: { name: '...', category: '...', q_xxx: '...' }
+  const [fieldErrors, setFieldErrors] = useState({})
 
   const addQuestion = () => {
     setQuestions(prev => [
