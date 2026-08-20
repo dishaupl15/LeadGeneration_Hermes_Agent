@@ -74,6 +74,7 @@ SUBMISSIONS_COLL = "form_submissions"
 # ── allowed values ────────────────────────────────────────────────────────────
 ALLOWED_QUESTION_TYPES = {
     "short_text", "email", "phone", "number",
+    "date", "time",
     "dropdown", "radio", "checkbox", "long_text",
 }
 ALLOWED_PLATFORMS = {"linkedin", "x", "whatsapp", "facebook", "website", "other"}
@@ -95,7 +96,7 @@ class QuestionOption(BaseModel):
 class FormQuestion(BaseModel):
     question_id:   str              = Field(default_factory=lambda: "q_" + uuid.uuid4().hex[:8])
     label:         str              = Field(..., min_length=1, max_length=300)
-    type:          str              = Field(..., description="short_text|email|phone|number|dropdown|radio|checkbox|long_text")
+    type:          str              = Field(..., description="short_text|email|phone|number|date|time|dropdown|radio|checkbox|long_text")
     required:      bool             = Field(default=False)
     options:       list[QuestionOption] = Field(default_factory=list)
     display_order: int              = Field(default=0, ge=0)
