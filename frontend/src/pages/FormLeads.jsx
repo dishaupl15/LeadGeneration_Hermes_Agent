@@ -14,26 +14,12 @@ import { useNavigate } from 'react-router-dom'
 import { CATEGORIES } from '../config/categories'
 import { BRAND } from '../config/brandConfig'
 import Layout from '../components/Layout'
+import { getPublicFormUrl, getCampaignTrackingUrl } from '../config/publicUrl'
 import {
   createForm, listForms, getFormDetail,
   updateForm, deleteForm, createCampaign, listSubmissions,
   submitPublicForm,
 } from '../services/api'
-
-const BASE_URL = (() => {
-  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL.replace(/\/$/, '')
-  if (typeof window !== 'undefined') return `${window.location.protocol}//${window.location.hostname}:8002`
-  return 'http://localhost:8002'
-})()
-
-// Public form base URL — where the FRONTEND is hosted (used for shareable links).
-// Auto-follows the hostname the user is on, so links work from localhost AND
-// from the LAN IP without any .env change.
-// Override with VITE_PUBLIC_FORM_BASE_URL for production deployments.
-const FRONTEND_BASE = (
-  import.meta.env.VITE_PUBLIC_FORM_BASE_URL?.replace(/\/$/, '') ||
-  (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173')
-)
 
 const QUESTION_TYPES = [
   { value: 'short_text', label: 'Short Text' },
@@ -832,12 +818,12 @@ function FormDetail({ formId, onBack, onEdit }) {
 
   const form      = data.form
   const campaigns = data.campaigns ?? []
-  const publicUrl = `${FRONTEND_BASE}/f/${formId}`
+  const publicUrl = getPublicFormUrl(formId)
 
-  // build frontend tracking URLs
+  // build frontend tracking URLs using the central helper
   const trackingLinks = campaigns.map(c => ({
     ...c,
-    tracking_url: `${FRONTEND_BASE}/f/${formId}?source=${c.platform}&campaign_id=${c.campaign_id}`,
+    tracking_url: getCampaignTrackingUrl(formId, c.platform, c.campaign_id),
   }))
 
   return (
@@ -883,6 +869,20 @@ function FormDetail({ formId, onBack, onEdit }) {
         <span className="text-xs font-semibold text-slate-500 flex-shrink-0">Public URL:</span>
         <span className="text-xs text-indigo-600 truncate flex-1 font-mono">{publicUrl}</span>
         <CopyBtn text={publicUrl} />
+        <a
+          href={publicUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold border
+                     border-slate-200 bg-white text-slate-600 hover:bg-indigo-50 hover:border-indigo-300
+                     hover:text-indigo-700 transition-colors inline-flex items-center gap-1"
+          title="Open public form in new tab"
+        >
+          Open
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+          </svg>
+        </a>
       </div>
 
       {/* tabs */}

@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  LeadCRM — Production Docker Compose
+#
+#  Services:
+#    frontend  — React SPA served by Nginx on port 80 (with SPA fallback)
+#    backend   — FastAPI + Uvicorn on port 8002
+#
+#  Before running in production:
+#    1. Copy backend/.env.example → backend/.env and fill in all secrets.
+#    2. Set VITE_API_URL and VITE_PUBLIC_APP_URL (see comments below).
+#    3. Run:  docker compose up --build -d
+#
+#  IMPORTANT environment variables:
+#    VITE_PUBLIC_APP_URL   — PUBLIC URL of the frontend (e.g. https://your-domain.com)
+#    VITE_API_URL          — PUBLIC URL of the backend  (e.g. https://api.your-domain.com)
+#    PUBLIC_FORM_BASE_URL  — Same as VITE_PUBLIC_APP_URL but for the backend (in backend/.env)
+#    CORS_ORIGINS          — Must include your frontend domain (in backend/.env)
+#
+#  Do NOT use localhost, 127.0.0.1, or private IPs for the above in production.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Backend — FastAPI ───────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: leadcrm-backend
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    env_file:
+      - ./backend/.env
+    # Override individual variables here for production:
+    # environment:
+    #   - PUBLIC_FORM_BASE_URL=https://your-frontend-domain.com
+    #   - CORS_ORIGINS=https://your-frontend-domain.com
+
+  # ── Frontend — React SPA served by Nginx ───────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # These are baked into the JS bundle at build time by Vite.
+        # Set them to your production domain before running docker compose up --build.
+        # Example:
+        #   VITE_API_URL: https://api.your-domain.com
+        #   VITE_PUBLIC_APP_URL: https://your-domain.com
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8002}
+        VITE_PUBLIC_APP_URL: ${VITE_PUBLIC_APP_URL:-}
+    container_name: leadcrm-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
