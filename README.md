@@ -240,3 +240,4 @@ Add or remove categories by editing `src/config/categories.js` — the UI update
 ## License
 
 MIT
+"# sales-pratap" 
