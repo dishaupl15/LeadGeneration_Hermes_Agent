@@ -345,7 +345,7 @@ export default function GenerateLeads() {
       if (res.success) {
         setRedditLeads(res.leads ?? [])
         setRefreshTick(t => t + 1)
-      } else {
+      } else if (res.error !== 'no_credentials') {
         setRedditError(res.message || res.error || 'Lead search failed')
       }
     } catch (err) {
