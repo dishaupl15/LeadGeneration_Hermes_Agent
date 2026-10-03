@@ -21,7 +21,7 @@ const BASE_URL = (() => {
   if (typeof window !== 'undefined') {
     return `${window.location.protocol}//${window.location.hostname}:8002`
   }
-  return 'http://localhost:8002'
+  return ''
 })()
 
 /**
@@ -121,6 +121,7 @@ async function apiFetch(path, opts = {}) {
 export async function generateLeads({ industry, state, district = null, target = 10 }) {
   return apiFetch('/leads/generate-leads', {
     method: 'POST',
+    _timeoutMs: 31 * 60 * 1000,
     body: JSON.stringify({ industry, state, district: district || null, target }),
   })
 }
@@ -240,6 +241,7 @@ export async function getMapsDistricts(state) {
 export async function generateMapsLeads({ category, state, district, target = 50, exclude_seen = true }) {
   return apiFetch('/maps-leads/generate', {
     method: 'POST',
+    _timeoutMs: 31 * 60 * 1000,
     body: JSON.stringify({ category, state, district: district || null, target, exclude_seen }),
   })
 }
