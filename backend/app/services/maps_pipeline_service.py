@@ -59,6 +59,10 @@ class _PipelineStats:
     def __init__(self):
         self.gmaps_discovered     = 0
         self.gmaps_duplicates     = 0
+        self.gmaps_api_calls      = 0
+        self.gmaps_phones_found   = 0
+        self.gmaps_websites_found = 0
+        self.gmaps_addresses_found = 0
         self.companyenrich_calls  = 0
         self.companyenrich_filled = 0
         self.serper_calls         = 0
@@ -81,8 +85,12 @@ class _PipelineStats:
         self.pdl_contacts               = 0
         self.prospeo_calls              = 0
         self.prospeo_contacts           = 0
+        self.prospeo_emails             = 0
+        self.prospeo_phones             = 0
         self.contactout_calls           = 0
         self.contactout_contacts        = 0
+        self.contactout_emails          = 0
+        self.contactout_phones          = 0
         self.people_target_reached      = 0
         self.people_auth_failures       = 0
         self.hunter_calls      = 0
@@ -106,6 +114,10 @@ def get_pipeline_stats() -> dict:
     return {
         "google_maps_discovered":     s.gmaps_discovered,
         "google_maps_duplicates":     s.gmaps_duplicates,
+        "google_maps_api_calls":      s.gmaps_api_calls,
+        "google_maps_phones_found":   s.gmaps_phones_found,
+        "google_maps_websites_found": s.gmaps_websites_found,
+        "google_maps_addresses_found": s.gmaps_addresses_found,
         "companyenrich_calls":        s.companyenrich_calls,
         "companyenrich_fields_filled": s.companyenrich_filled,
         "serper_calls":               s.serper_calls,
@@ -128,8 +140,12 @@ def get_pipeline_stats() -> dict:
         "pdl_contacts":               s.pdl_contacts,
         "prospeo_calls":              s.prospeo_calls,
         "prospeo_contacts":           s.prospeo_contacts,
+        "prospeo_emails":             s.prospeo_emails,
+        "prospeo_phones":             s.prospeo_phones,
         "contactout_calls":           s.contactout_calls,
         "contactout_contacts":        s.contactout_contacts,
+        "contactout_emails":          s.contactout_emails,
+        "contactout_phones":          s.contactout_phones,
         "people_target_reached":      s.people_target_reached,
         "people_auth_failures":       s.people_auth_failures,
         # Hunter.io fallback stats
@@ -885,12 +901,16 @@ async def _enrich_via_people_orchestrator(company: dict) -> dict:
     if pro_ps and pro_ps.called:
         _pipeline_stats.prospeo_calls    += pro_ps.api_calls
         _pipeline_stats.prospeo_contacts += pro_ps.contacts_found
+        _pipeline_stats.prospeo_emails   += pro_ps.emails_found
+        _pipeline_stats.prospeo_phones   += pro_ps.phones_found
         if pro_ps.error == "auth_failed":
             _pipeline_stats.people_auth_failures += 1
 
     if co_ps and co_ps.called:
         _pipeline_stats.contactout_calls    += co_ps.api_calls
         _pipeline_stats.contactout_contacts += co_ps.contacts_found
+        _pipeline_stats.contactout_emails   += co_ps.emails_found
+        _pipeline_stats.contactout_phones   += co_ps.phones_found
         if co_ps.error == "auth_failed":
             _pipeline_stats.people_auth_failures += 1
 
@@ -1053,6 +1073,7 @@ async def run_maps_pipeline(
     _pipeline_stats.gmaps_duplicates = (
         gmaps_stats.duplicates_removed + gmaps_stats.secondary_dupes + gmaps_stats.previously_seen
     )
+    _pipeline_stats.gmaps_api_calls = getattr(gmaps_stats, "total_api_calls", 0)
 
     _log("GOOGLE_MAPS", f"Discovered: {len(businesses)}")
     _log("GOOGLE_MAPS", f"New unique: {len(businesses)}")
@@ -1074,6 +1095,9 @@ async def run_maps_pipeline(
     n_phone   = sum(1 for c in companies if c.get("company_number"))
     n_website = sum(1 for c in companies if c.get("website"))
     n_address = sum(1 for c in companies if c.get("address"))
+    _pipeline_stats.gmaps_phones_found = n_phone
+    _pipeline_stats.gmaps_websites_found = n_website
+    _pipeline_stats.gmaps_addresses_found = n_address
     _log("ENRICH", f"Google Maps complete fields — phone:{n_phone}/{len(companies)} website:{n_website}/{len(companies)} address:{n_address}/{len(companies)}")
 
     all_missing = []

@@ -365,7 +365,34 @@ async def generate_leads(payload: GenerateLeadsRequest):
     if not pipeline_companies:
         _log("LEADS", "No companies found — returning empty result")
         await _append_log(db_early, run_id, "COMPLETE", "pipeline", "No companies found — run completed with 0 results")
-        await _complete_history_run(db_early, run_id, 0, 0, [], {}, {}, t_start, [])
+        empty_pipeline_stats = {
+            "provider_metrics_version":   1,
+            "google_maps_discovered":      ps.get("google_maps_discovered", 0),
+            "google_maps_duplicates":      ps.get("google_maps_duplicates", 0),
+            "google_maps_api_calls":       ps.get("google_maps_api_calls", 0),
+            "google_maps_phones_found":    ps.get("google_maps_phones_found", 0),
+            "google_maps_websites_found":  ps.get("google_maps_websites_found", 0),
+            "google_maps_addresses_found": ps.get("google_maps_addresses_found", 0),
+            "companyenrich_calls":         ps.get("companyenrich_calls", 0),
+            "companyenrich_fields_filled": ps.get("companyenrich_fields_filled", 0),
+            "serper_calls":                ps.get("serper_calls", 0),
+            "serper_fields_filled":        ps.get("serper_fields_filled", 0),
+            "firecrawl_calls":             ps.get("firecrawl_calls", 0),
+            "firecrawl_fields_filled":     ps.get("firecrawl_fields_filled", 0),
+            "prospeo_calls":               ps.get("prospeo_calls", 0),
+            "prospeo_contacts":            ps.get("prospeo_contacts", 0),
+            "prospeo_emails":              ps.get("prospeo_emails", 0),
+            "prospeo_phones":              ps.get("prospeo_phones", 0),
+            "contactout_calls":            ps.get("contactout_calls", 0),
+            "contactout_contacts":         ps.get("contactout_contacts", 0),
+            "contactout_emails":           ps.get("contactout_emails", 0),
+            "contactout_phones":           ps.get("contactout_phones", 0),
+            "elapsed_seconds":             round(time.monotonic() - t_start, 1),
+            "run_id":                      run_id,
+        }
+        await _complete_history_run(
+            db_early, run_id, 0, 0, [], empty_pipeline_stats, {}, t_start, []
+        )
         return MongoLeadsResponse(
             success=True,
             inserted=0,
@@ -374,15 +401,7 @@ async def generate_leads(payload: GenerateLeadsRequest):
             query=query,
             timestamp=datetime.now(timezone.utc).isoformat(),
             leads=[],
-            pipeline_stats={
-                "google_maps_discovered": ps.get("google_maps_discovered", 0),
-                "google_maps_duplicates": ps.get("google_maps_duplicates", 0),
-                "companyenrich_calls":    ps.get("companyenrich_calls", 0),
-                "serper_calls":           ps.get("serper_calls", 0),
-                "firecrawl_calls":        ps.get("firecrawl_calls", 0),
-                "elapsed_seconds":        round(time.monotonic() - t_start, 1),
-                "run_id":                 run_id,
-            },
+            pipeline_stats=empty_pipeline_stats,
         )
 
     # ── Stage 4: Route-level dedup (within-batch) + cap ───────────────────────
@@ -774,8 +793,13 @@ async def generate_leads(payload: GenerateLeadsRequest):
         _log("LEADS", f"API contribution report error (non-fatal): {_cr_exc}")
 
     final_pipeline_stats = {
+        "provider_metrics_version":   1,
         "google_maps_discovered":      ps.get("google_maps_discovered", 0),
         "google_maps_duplicates":      ps.get("google_maps_duplicates", 0),
+        "google_maps_api_calls":       ps.get("google_maps_api_calls", 0),
+        "google_maps_phones_found":    ps.get("google_maps_phones_found", 0),
+        "google_maps_websites_found":  ps.get("google_maps_websites_found", 0),
+        "google_maps_addresses_found": ps.get("google_maps_addresses_found", 0),
         "companyenrich_calls":         ps.get("companyenrich_calls", 0),
         "companyenrich_fields_filled": ps.get("companyenrich_fields_filled", 0),
         "serper_calls":                ps.get("serper_calls", 0),
@@ -801,8 +825,12 @@ async def generate_leads(payload: GenerateLeadsRequest):
         "pdl_contacts":                ps.get("pdl_contacts", 0),
         "prospeo_calls":               ps.get("prospeo_calls", 0),
         "prospeo_contacts":            ps.get("prospeo_contacts", 0),
+        "prospeo_emails":              ps.get("prospeo_emails", 0),
+        "prospeo_phones":              ps.get("prospeo_phones", 0),
         "contactout_calls":            ps.get("contactout_calls", 0),
         "contactout_contacts":         ps.get("contactout_contacts", 0),
+        "contactout_emails":           ps.get("contactout_emails", 0),
+        "contactout_phones":           ps.get("contactout_phones", 0),
         # Legacy compat
         "pdl_companies_searched":      ps.get("pdl_companies_searched", 0),
         "pdl_contacts_found":          ps.get("pdl_contacts_found", 0),

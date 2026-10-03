@@ -86,11 +86,51 @@ function RunDetailPanel({ runId, onClose, onViewLeads }) {
   }
 
   const stats = run?.statistics ?? {}
+  const providerStats = run?.pipeline_stats ?? {}
+  const hasProviderMetrics = providerStats.provider_metrics_version === 1
+  const providerRows = [
+    {
+      name: 'Google Maps',
+      calls: providerStats.google_maps_api_calls,
+      output: `${providerStats.google_maps_discovered ?? 0} companies`,
+      detail: `${providerStats.google_maps_phones_found ?? 0} phones · ${providerStats.google_maps_websites_found ?? 0} websites · ${providerStats.google_maps_addresses_found ?? 0} addresses`,
+    },
+    {
+      name: 'CompanyEnrich',
+      calls: providerStats.companyenrich_calls,
+      output: `${providerStats.companyenrich_fields_filled ?? 0} fields filled`,
+      detail: 'Company fields',
+    },
+    {
+      name: 'Serper',
+      calls: providerStats.serper_calls,
+      output: `${providerStats.serper_fields_filled ?? 0} fields filled`,
+      detail: 'Company fields',
+    },
+    {
+      name: 'Firecrawl',
+      calls: providerStats.firecrawl_calls,
+      output: `${providerStats.firecrawl_fields_filled ?? 0} fields filled`,
+      detail: 'Company fields',
+    },
+    {
+      name: 'Prospeo',
+      calls: providerStats.prospeo_calls,
+      output: `${providerStats.prospeo_contacts ?? 0} contacts`,
+      detail: `${providerStats.prospeo_emails ?? 0} emails · ${providerStats.prospeo_phones ?? 0} phones`,
+    },
+    {
+      name: 'ContactOut',
+      calls: providerStats.contactout_calls,
+      output: `${providerStats.contactout_contacts ?? 0} contacts`,
+      detail: `${providerStats.contactout_emails ?? 0} emails · ${providerStats.contactout_phones ?? 0} phones`,
+    },
+  ]
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-md h-full bg-white shadow-2xl flex flex-col overflow-hidden z-10">
+      <div className="relative w-full max-w-2xl h-full bg-white shadow-2xl flex flex-col overflow-hidden z-10">
 
         {/* Header */}
         <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-200 flex-shrink-0">
@@ -159,6 +199,53 @@ function RunDetailPanel({ runId, onClose, onViewLeads }) {
                 </div>
               </section>
             )}
+
+            <section>
+              <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-2">
+                Provider Contribution
+              </h4>
+              {hasProviderMetrics ? (
+                <>
+                  <div className="overflow-x-auto rounded-lg border border-slate-200">
+                    <table className="w-full min-w-[560px] text-left text-xs">
+                      <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+                        <tr>
+                          <th className="px-3 py-2 font-semibold">Provider</th>
+                          <th className="px-3 py-2 text-right font-semibold">Calls</th>
+                          <th className="px-3 py-2 font-semibold">Data returned</th>
+                          <th className="px-3 py-2 font-semibold">Data breakdown</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {providerRows.map((provider) => (
+                          <tr key={provider.name}>
+                            <th className="whitespace-nowrap px-3 py-2.5 font-semibold text-slate-800">
+                              {provider.name}
+                            </th>
+                            <td className="px-3 py-2.5 text-right tabular-nums text-slate-700">
+                              {provider.calls ?? 0}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2.5 font-semibold tabular-nums text-slate-800">
+                              {provider.output}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2.5 text-slate-500">
+                              {provider.detail}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="mt-2 text-[10px] leading-relaxed text-slate-400">
+                    Maps reports discovered companies and initial fields; CompanyEnrich, Serper, and Firecrawl report fields filled; Prospeo and ContactOut report returned contacts. Contact totals can overlap across providers. Calls are provider attempts/API requests as counted by the pipeline.
+                  </p>
+                </>
+              ) : (
+                <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500">
+                  Provider metrics are not available for this run. Newly generated runs will include them.
+                </p>
+              )}
+            </section>
 
             <section>
               <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-2">
